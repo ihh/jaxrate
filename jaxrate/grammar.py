@@ -41,6 +41,11 @@ def validate_grammar(grammar):
     if grammar.nonterminals[grammar.start].fan_out != 1:
         raise ValueError("Start nonterminal must have fan-out 1")
 
+    for i, nt in enumerate(grammar.nonterminals):
+        if nt.max_span is not None and nt.max_span < 1:
+            raise ValueError(
+                f"Nonterminal {i} ({nt.name}): max_span must be >= 1, got {nt.max_span}")
+
     for i, rule in enumerate(grammar.rules):
         if rule.lhs < 0 or rule.lhs >= n_nt:
             raise ValueError(f"Rule {i}: LHS index {rule.lhs} out of range")
@@ -115,6 +120,10 @@ def compile_grammar(grammar):
         n_rules_for_nt[nt_idx] = len(rule_list)
 
     fan_outs = np.array([nt.fan_out for nt in grammar.nonterminals], dtype=np.int32)
+    max_spans = np.array(
+        [nt.max_span if nt.max_span is not None else -1
+         for nt in grammar.nonterminals],
+        dtype=np.int32)
 
     return CompiledGrammar(
         grammar_class=grammar_class,
@@ -132,6 +141,7 @@ def compile_grammar(grammar):
         start=grammar.start,
         n_models=grammar.n_models,
         fan_outs=jnp.array(fan_outs),
+        max_spans=jnp.array(max_spans),
     )
 
 
@@ -152,10 +162,10 @@ class GrammarBuilder:
         self.nonterminals = []
         self.rules = []
 
-    def add_nonterminal(self, name, fan_out=1):
+    def add_nonterminal(self, name, fan_out=1, max_span=None):
         """Add a nonterminal and return its index."""
         idx = len(self.nonterminals)
-        self.nonterminals.append(Nonterminal(name=name, fan_out=fan_out))
+        self.nonterminals.append(Nonterminal(name=name, fan_out=fan_out, max_span=max_span))
         return idx
 
     def add_rule(self, lhs, rhs=(), emissions=(), log_weight=0.0, composition=()):

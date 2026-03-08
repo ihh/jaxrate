@@ -10,9 +10,8 @@ jaxrate implements grammar-based phylogenetic sequence annotation. Given a multi
 - **Outside/Backward**: Per-position contributions to the total likelihood
 - **Viterbi/CYK**: Most probable annotation (parse) of the alignment
 - **EM training**: Optimize grammar rule weights from data
-- **Simulation**: Sample derivations and alignments from grammars
 
-## Grammar classes
+Grammar class is auto-detected and the appropriate algorithm is dispatched:
 
 | Class | Fan-out | Complexity | Algorithm | Example |
 |-------|---------|-----------|-----------|---------|
@@ -20,8 +19,6 @@ jaxrate implements grammar-based phylogenetic sequence annotation. Given a multi
 | SCFG | 1 (context-free) | O(C³K³) | chart-based | RNA structure |
 | MCFG | 2 | O(C⁶K³) | chart-based | Pseudoknots |
 | MCFG + max_span | 2 | O(C²L²K³ + C³K³) | chart-based | Pseudoknots (bounded) |
-
-Grammar class is auto-detected and the appropriate algorithm is dispatched.
 
 ## Installation
 
@@ -78,7 +75,22 @@ labels, log_prob = viterbi(grammar, tw)
 print(f"Best path: {labels}")
 ```
 
+## Repository layout
+
+```
+jaxrate/            Grammar-based phylogenetic annotation library
+  data/             Bundled data files (Rfam alignments)
+examples/           Example scripts
+tests/              Unit and integration tests
+docs/               Documentation source
+scripts/            Build and utility scripts
+```
+
 ## Dependencies
 
 - [JAX](https://github.com/google/jax) >= 0.4.20
 - [subby](https://github.com/ihh/subby) — phylogenetic sufficient statistics
+
+## Documentation
+
+Built documentation is at [ihh.github.io/jaxrate](https://ihh.github.io/jaxrate/). Source is in `docs/`; build with `python scripts/build_docs.py`.

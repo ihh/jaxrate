@@ -13,9 +13,12 @@ class Nonterminal(NamedTuple):
     Attributes:
         name: Human-readable name (e.g., 'S', 'Stem', 'Loop')
         fan_out: Number of string components (1 for HMM/SCFG, 2 for MCFG)
+        max_span: Maximum span per component (None = unlimited).
+                  For fan-out 2, constrains each component independently.
     """
     name: str
     fan_out: int = 1
+    max_span: Optional[int] = None
 
 
 class EmissionGroup(NamedTuple):
@@ -84,6 +87,7 @@ class CompiledGrammar(NamedTuple):
         start: int — start nonterminal index
         n_models: int — number of emission models
         fan_outs: (n_nonterminals,) int32 — fan-out per nonterminal
+        max_spans: (n_nonterminals,) int32 — max span per component (-1 = unlimited)
     """
     grammar_class: str
     n_nonterminals: int
@@ -100,6 +104,7 @@ class CompiledGrammar(NamedTuple):
     start: int
     n_models: int
     fan_outs: jnp.ndarray
+    max_spans: jnp.ndarray = None
 
 
 class TerminalWeights(NamedTuple):

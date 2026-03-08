@@ -97,6 +97,9 @@ gene_grammar = gene_finder_grammar()
 
 # Pseudoknot prediction (MCFG)
 pk_grammar = pseudoknot_grammar()
+
+# Pseudoknot with bounded stem span (reduces complexity)
+pk_grammar_bounded = pseudoknot_grammar(max_span=15)
 ```
 
 ## Step 5: EM training
@@ -111,3 +114,25 @@ trained_grammar, state, history = train(
 )
 print(f"Converged at iteration {state.iteration}, LL={state.log_likelihood:.4f}")
 ```
+
+## Step 6: Pseudoknot prediction with max_span
+
+The `pseudoknot_grammar` produces an MCFG with fan-out 2 nonterminals. The `max_span` parameter constrains each component's span, reducing complexity from O(C⁶K³) to O(C²L²K³ + C³K³):
+
+```python
+from jaxrate.presets import pseudoknot_grammar
+from jaxrate.mcfg import mcfg_inside, mcfg_viterbi
+from jaxrate import compile_grammar, TerminalWeights
+
+# Build grammar with bounded pseudoknot stems
+grammar = pseudoknot_grammar(max_span=15)
+cg = compile_grammar(grammar)
+
+# Run Viterbi decoding
+labels, log_prob, backpointers = mcfg_viterbi(cg, tw)
+
+# Run inside algorithm
+alpha1, alpha2, log_likelihood = mcfg_inside(cg, tw)
+```
+
+The `max_span` limits how far apart the paired positions in a pseudoknot stem can be. For example, `max_span=15` means each component of the PK nonterminal can span at most 15 columns. Setting `max_span` equal to or larger than the sequence length gives the same result as unlimited.

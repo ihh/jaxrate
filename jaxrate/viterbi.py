@@ -32,5 +32,5 @@ def viterbi(grammar, terminal_weights):
         labels, log_prob, _ = scfg_viterbi(cg, terminal_weights)
         return labels, log_prob
     else:
-        labels, log_prob = mcfg_viterbi(cg, terminal_weights)
+        labels, log_prob, _ = mcfg_viterbi(cg, terminal_weights)
         return labels, log_prob

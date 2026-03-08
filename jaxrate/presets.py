@@ -150,7 +150,7 @@ def gene_finder_grammar():
     return gb.build(start=IG, n_models=3)
 
 
-def pseudoknot_grammar():
+def pseudoknot_grammar(max_span=None):
     """Pseudoknot-capable MCFG with fan-out 2.
 
     Nonterminals:
@@ -169,33 +169,42 @@ def pseudoknot_grammar():
         0 — unpaired emission model
         1 — paired emission model
 
+    Args:
+        max_span: Maximum span per component for the PK nonterminal.
+                  None means unlimited. Constraining this reduces complexity
+                  from O(C⁶K³) to O(C²L²K³ + C³K³).
+
     Returns:
         Grammar
     """
     gb = GrammarBuilder()
 
     S = gb.add_nonterminal('S', fan_out=1)
-    PK = gb.add_nonterminal('PK', fan_out=2)
+    PK = gb.add_nonterminal('PK', fan_out=2, max_span=max_span)
     L = gb.add_nonterminal('L', fan_out=1)
 
-    # S → L S
-    gb.add_rule(S, rhs=[L, S], log_weight=jnp.log(0.3))
+    # S → L S  (stem then more structure)
+    gb.add_rule(S, rhs=[L, S], log_weight=jnp.log(0.2))
 
-    # S → PK S  (pseudoknot then more)
-    # Note: PK has fan-out 2, so this rule concatenates PK's two components
-    gb.add_rule(S, rhs=[PK, S], log_weight=jnp.log(0.1))
+    # S → e S  (unpaired then more structure)
+    gb.add_rule(S, rhs=[S],
+                emissions=[EmissionGroup(1, 0)],
+                log_weight=jnp.log(0.3))
 
-    # S → e (unpaired)
+    # S → PK  (pseudoknot region, concatenates PK's two components)
+    gb.add_rule(S, rhs=[PK], log_weight=jnp.log(0.1))
+
+    # S → e (terminal unpaired)
     gb.add_rule(S, rhs=[],
                 emissions=[EmissionGroup(1, 0)],
-                log_weight=jnp.log(0.6))
+                log_weight=jnp.log(0.4))
 
-    # L → e₁ S e₂ (paired emission)
+    # L → e₁ S e₂ (paired emission flanking inner structure)
     gb.add_rule(L, rhs=[S],
                 emissions=[EmissionGroup(2, 1)],
                 log_weight=0.0)
 
-    # PK(x, y) → L(x) L(y)  (two independent stem-loops)
+    # PK(x, y) → L(x) L(y)  (two non-overlapping stem-loops)
     gb.add_rule(PK, rhs=[L, L], log_weight=0.0)
 
     return gb.build(start=S, n_models=2)
