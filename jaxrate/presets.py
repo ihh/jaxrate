@@ -204,7 +204,21 @@ def pseudoknot_grammar(max_span=None):
                 emissions=[EmissionGroup(2, 1)],
                 log_weight=0.0)
 
-    # PK(x, y) → L(x) L(y)  (two non-overlapping stem-loops)
-    gb.add_rule(PK, rhs=[L, L], log_weight=0.0)
+    # PK(ax, by) → PK(x, y) [pair(a,b)]  (extend stem 1: left-left)
+    # Pairs left of component 1 with left of component 2
+    gb.add_rule(PK, rhs=[PK],
+                emissions=[EmissionGroup(2, 1)],
+                composition=('ll',),
+                log_weight=jnp.log(0.4))
+
+    # PK(xa, yb) → PK(x, y) [pair(a,b)]  (extend stem 2: right-right)
+    # Pairs right of component 1 with right of component 2
+    gb.add_rule(PK, rhs=[PK],
+                emissions=[EmissionGroup(2, 1)],
+                composition=('rr',),
+                log_weight=jnp.log(0.4))
+
+    # PK(x, y) → S(x) S(y)  (base: each component is independent structure)
+    gb.add_rule(PK, rhs=[S, S], log_weight=jnp.log(0.2))
 
     return gb.build(start=S, n_models=2)

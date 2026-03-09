@@ -116,12 +116,15 @@ def main():
 
     labels, log_prob, bp = mcfg_viterbi(cg, tw)
     nt_names = [nt.name for nt in grammar.nonterminals]
+    # Single-char abbreviation for display: S='.', L='(', PK='X'
+    abbrev = {'S': '.', 'L': '(', 'PK': 'X'}
     annotation = [nt_names[int(l)] for l in labels]
+    ann_chars = [abbrev.get(a, a[0]) for a in annotation]
 
     seq = list(seqs.values())[0][:C]
     print(f"\nSequence:   {seq}")
     print(f"SS_cons:    {ss_trimmed}")
-    print(f"Predicted:  {''.join(annotation)}")
+    print(f"Predicted:  {''.join(ann_chars)}   (.=S, (=L, X=PK)")
     print(f"Log-prob:   {log_prob:.4f}")
 
     # Accuracy
@@ -129,7 +132,7 @@ def main():
     for i, j in pairs:
         if i < C and j < C:
             paired_cols.update([i, j])
-    predicted_paired = {i for i in range(C) if annotation[i] == 'L'}
+    predicted_paired = {i for i in range(C) if annotation[i] in ('L', 'PK')}
     true_paired = paired_cols & set(range(C))
     overlap = predicted_paired & true_paired
     sens = len(overlap) / len(true_paired) if true_paired else 0
@@ -137,9 +140,6 @@ def main():
     print(f"Paired: true={len(true_paired)}, pred={len(predicted_paired)}, "
           f"overlap={len(overlap)}")
     print(f"Sensitivity={sens:.2f}, PPV={ppv:.2f}")
-    print("\nNote: This grammar finds nested stems (via SCFG rules).")
-    print("Crossing pseudoknot stems require the PK nonterminal's")
-    print("crossing composition, which contributes when pair signals cross.")
 
     # --- Part 2: max_span effect on a targeted example ---
     print("\n=== max_span constraint demonstration ===")

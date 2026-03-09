@@ -81,6 +81,8 @@ def mcfg_inside(cg, tw):
                 continue
             n_rhs = int(cg.rule_n_rhs[r])
             log_w = float(cg.rule_log_weights[r])
+            n_emit = int(cg.rule_n_emissions[r])
+            comp = int(cg.rule_composition[r]) if cg.rule_composition is not None else 0
 
             L = _max_span(lhs)
 
@@ -97,7 +99,32 @@ def mcfg_inside(cg, tw):
                         if j2 > C:
                             break
 
-                        if n_rhs == 2:
+                        if n_rhs == 1 and n_emit > 0 and fo[int(cg.rule_rhs[r, 0])] == 2:
+                            # Fan-out 2 unary with paired emission
+                            rhs0 = int(cg.rule_rhs[r, 0])
+                            model_idx = int(cg.rule_emission_model[r, 0])
+                            if comp == 1 and tw.paired is not None:
+                                # 'll': PK(ax, by) → PK(x, y) [pair(a,b)]
+                                # Emit left of comp1 (i1) paired with left of comp2 (i2)
+                                if span1 >= 2 and need_span2 >= 2:
+                                    emit_w = tw.paired[model_idx, i1, i2]
+                                    inner = alpha2[rhs0, i1 + 1, j1, i2 + 1, j2]
+                                    s = log_w + emit_w + inner
+                                    alpha2 = alpha2.at[lhs, i1, j1, i2, j2].set(
+                                        jnp.logaddexp(
+                                            alpha2[lhs, i1, j1, i2, j2], s))
+                            elif comp == 2 and tw.paired is not None:
+                                # 'rr': PK(xa, yb) → PK(x, y) [pair(a,b)]
+                                # Emit right of comp1 (j1-1) paired with right of comp2 (j2-1)
+                                if span1 >= 2 and need_span2 >= 2:
+                                    emit_w = tw.paired[model_idx, j1 - 1, j2 - 1]
+                                    inner = alpha2[rhs0, i1, j1 - 1, i2, j2 - 1]
+                                    s = log_w + emit_w + inner
+                                    alpha2 = alpha2.at[lhs, i1, j1, i2, j2].set(
+                                        jnp.logaddexp(
+                                            alpha2[lhs, i1, j1, i2, j2], s))
+
+                        elif n_rhs == 2:
                             rhs0 = int(cg.rule_rhs[r, 0])
                             rhs1 = int(cg.rule_rhs[r, 1])
                             # Crossing composition: A(x₁y₁, x₂y₂) → B(x₁, x₂) C(y₁, y₂)
@@ -243,6 +270,8 @@ def mcfg_viterbi(cg, tw):
                 continue
             n_rhs = int(cg.rule_n_rhs[r])
             log_w = float(cg.rule_log_weights[r])
+            n_emit = int(cg.rule_n_emissions[r])
+            comp = int(cg.rule_composition[r]) if cg.rule_composition is not None else 0
 
             L = _max_span(lhs)
 
@@ -258,7 +287,31 @@ def mcfg_viterbi(cg, tw):
                         if j2 > C:
                             break
 
-                        if n_rhs == 2:
+                        if n_rhs == 1 and n_emit > 0 and fo[int(cg.rule_rhs[r, 0])] == 2:
+                            rhs0 = int(cg.rule_rhs[r, 0])
+                            model_idx = int(cg.rule_emission_model[r, 0])
+                            if comp == 1 and tw.paired is not None:
+                                # 'll': pair left of comp1 with left of comp2
+                                if span1 >= 2 and need_span2 >= 2:
+                                    emit_w = float(tw.paired[model_idx, i1, i2])
+                                    inner = float(v2[rhs0, i1 + 1, j1, i2 + 1, j2])
+                                    s = log_w + emit_w + inner
+                                    if s > float(v2[lhs, i1, j1, i2, j2]):
+                                        v2 = v2.at[lhs, i1, j1, i2, j2].set(s)
+                                        bp[('fo2', lhs, i1, j1, i2, j2)] = (
+                                            'll_pair', rhs0, model_idx)
+                            elif comp == 2 and tw.paired is not None:
+                                # 'rr': pair right of comp1 with right of comp2
+                                if span1 >= 2 and need_span2 >= 2:
+                                    emit_w = float(tw.paired[model_idx, j1 - 1, j2 - 1])
+                                    inner = float(v2[rhs0, i1, j1 - 1, i2, j2 - 1])
+                                    s = log_w + emit_w + inner
+                                    if s > float(v2[lhs, i1, j1, i2, j2]):
+                                        v2 = v2.at[lhs, i1, j1, i2, j2].set(s)
+                                        bp[('fo2', lhs, i1, j1, i2, j2)] = (
+                                            'rr_pair', rhs0, model_idx)
+
+                        elif n_rhs == 2:
                             rhs0 = int(cg.rule_rhs[r, 0])
                             rhs1 = int(cg.rule_rhs[r, 1])
                             if fo[rhs0] == 2 and fo[rhs1] == 2:
@@ -394,6 +447,18 @@ def mcfg_viterbi(cg, tw):
             _, rhs0, rhs1, k1, k2 = info
             _trace2(rhs0, i1, k1, i2, k2)
             _trace2(rhs1, k1, j1, k2, j2)
+        elif info[0] == 'll_pair':
+            # Left-left: emitted i1 and i2, inner is [i1+1,j1) [i2+1,j2)
+            _, rhs0, _ = info
+            labels = labels.at[i1].set(A)
+            labels = labels.at[i2].set(A)
+            _trace2(rhs0, i1 + 1, j1, i2 + 1, j2)
+        elif info[0] == 'rr_pair':
+            # Right-right: emitted j1-1 and j2-1, inner is [i1,j1-1) [i2,j2-1)
+            _, rhs0, _ = info
+            labels = labels.at[j1 - 1].set(A)
+            labels = labels.at[j2 - 1].set(A)
+            _trace2(rhs0, i1, j1 - 1, i2, j2 - 1)
 
     _trace1(cg.start, 0, C)
 

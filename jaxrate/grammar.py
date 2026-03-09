@@ -125,6 +125,15 @@ def compile_grammar(grammar):
          for nt in grammar.nonterminals],
         dtype=np.int32)
 
+    # Encode composition: 0=default, 1='ll', 2='rr'
+    comp_map = {'ll': 1, 'rr': 2}
+    rule_composition = np.zeros(n_rules, dtype=np.int32)
+    for i, rule in enumerate(grammar.rules):
+        if rule.composition and len(rule.composition) >= 1:
+            comp_str = rule.composition[0]
+            if comp_str in comp_map:
+                rule_composition[i] = comp_map[comp_str]
+
     return CompiledGrammar(
         grammar_class=grammar_class,
         n_nonterminals=n_nt,
@@ -142,6 +151,7 @@ def compile_grammar(grammar):
         n_models=grammar.n_models,
         fan_outs=jnp.array(fan_outs),
         max_spans=jnp.array(max_spans),
+        rule_composition=jnp.array(rule_composition),
     )
 
 

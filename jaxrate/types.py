@@ -88,6 +88,8 @@ class CompiledGrammar(NamedTuple):
         n_models: int — number of emission models
         fan_outs: (n_nonterminals,) int32 — fan-out per nonterminal
         max_spans: (n_nonterminals,) int32 — max span per component (-1 = unlimited)
+        rule_composition: (n_rules,) int32 — composition type per rule:
+            0 = default, 1 = 'll' (left-left paired), 2 = 'rr' (right-right paired)
     """
     grammar_class: str
     n_nonterminals: int
@@ -105,6 +107,7 @@ class CompiledGrammar(NamedTuple):
     n_models: int
     fan_outs: jnp.ndarray
     max_spans: jnp.ndarray = None
+    rule_composition: jnp.ndarray = None
 
 
 class TerminalWeights(NamedTuple):
