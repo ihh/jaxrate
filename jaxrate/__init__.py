@@ -38,4 +38,13 @@ from .presets import (
     pseudoknot_grammar,
 )
 
+from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar
+
+from .nj import (
+    neighbor_joining,
+    to_subby_tree,
+    hamming_distances,
+    jukes_cantor_distances,
+)
+
 __version__ = "0.1.0"

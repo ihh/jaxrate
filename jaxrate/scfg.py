@@ -11,6 +11,60 @@ from functools import partial
 from ._log_semiring import NEG_INF, logsumexp
 
 
+def _topo_sort_unary(unary_rules, K):
+    """Topologically sort unary rules for correct propagation order.
+
+    Returns unary rules reordered so that if A → B exists and B → C exists,
+    then B → C comes before A → B (process bottom-up: sources first).
+    """
+    # Build dependency graph: lhs depends on rhs
+    from collections import defaultdict, deque
+
+    # Adjacency: rhs -> [list of rule indices that have this rhs as LHS... no]
+    # We want: process rules whose RHS has no further unary rules first.
+
+    # Build: for each nonterminal, which unary rules have it as LHS?
+    rules_by_lhs = defaultdict(list)
+    rhs_set = set()
+    for idx, (lhs, rhs, log_w) in enumerate(unary_rules):
+        rules_by_lhs[lhs].append(idx)
+        rhs_set.add(rhs)
+
+    # Nonterminals that appear as RHS but not as LHS of unary rules are "sources"
+    lhs_set = set(rules_by_lhs.keys())
+    # In-degree for each LHS: depends on whether its RHS is also a LHS
+    in_degree = defaultdict(int)
+    deps = defaultdict(list)  # lhs -> [rhs nonterminals that are also LHS of unary rules]
+
+    for idx, (lhs, rhs, log_w) in enumerate(unary_rules):
+        if rhs in lhs_set:
+            in_degree[lhs] += 1
+            deps[rhs].append(lhs)
+        else:
+            in_degree.setdefault(lhs, 0)
+
+    # Kahn's algorithm
+    queue = deque([nt for nt in lhs_set if in_degree.get(nt, 0) == 0])
+    ordered_lhs = []
+    while queue:
+        nt = queue.popleft()
+        ordered_lhs.append(nt)
+        for dependent in deps.get(nt, []):
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+
+    # If there are cycles, append remaining (shouldn't happen in well-formed grammars)
+    remaining = [nt for nt in lhs_set if nt not in set(ordered_lhs)]
+    ordered_lhs.extend(remaining)
+
+    # Reorder rules: process rules whose LHS appears earlier in ordered_lhs first
+    lhs_order = {nt: i for i, nt in enumerate(ordered_lhs)}
+    sorted_indices = sorted(range(len(unary_rules)),
+                            key=lambda idx: lhs_order.get(unary_rules[idx][0], len(ordered_lhs)))
+    return [unary_rules[i] for i in sorted_indices]
+
+
 def _classify_rules(cg, tw):
     """Classify rules for SCFG chart filling.
 
@@ -20,12 +74,14 @@ def _classify_rules(cg, tw):
         emit_unary_rules: list of (lhs, rhs, log_w, model_idx) for left-emitting unary
         binary_rules: list of (lhs, rhs_left, rhs_right, log_w) for binary rules
         emit_paired: list of (lhs, rhs, log_w, model_idx) for paired-emission rules
+        epsilon_rules: list of (lhs, log_w) for epsilon productions (A → ε)
     """
     terminal_rules = []
     unary_rules = []
     emit_unary_rules = []
     binary_rules = []
     emit_paired = []
+    epsilon_rules = []
 
     for r in range(cg.n_rules):
         lhs = int(cg.rule_lhs[r])
@@ -34,11 +90,14 @@ def _classify_rules(cg, tw):
         n_emit = int(cg.rule_n_emissions[r])
 
         if n_rhs == 0:
-            # Terminal rule: emits column(s)
             if n_emit > 0:
+                # Terminal rule: emits column(s)
                 model_idx = int(cg.rule_emission_model[r, 0])
                 n_pos = int(cg.rule_emission_npos[r, 0])
                 terminal_rules.append((lhs, log_w, model_idx, n_pos))
+            else:
+                # Epsilon production: A → ε
+                epsilon_rules.append((lhs, log_w))
         elif n_rhs == 1:
             rhs0 = int(cg.rule_rhs[r, 0])
             if n_emit > 0:
@@ -59,7 +118,7 @@ def _classify_rules(cg, tw):
             rhs1 = int(cg.rule_rhs[r, 1])
             binary_rules.append((lhs, rhs0, rhs1, log_w))
 
-    return terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired
+    return terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired, epsilon_rules
 
 
 def scfg_inside(cg, tw):
@@ -80,25 +139,40 @@ def scfg_inside(cg, tw):
     K = cg.n_nonterminals
     C = tw.C
 
-    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired = \
-        _classify_rules(cg, tw)
+    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired, \
+        epsilon_rules = _classify_rules(cg, tw)
+
+    # Sort unary rules for correct propagation through chains
+    sorted_unary = _topo_sort_unary(unary_rules, K)
 
     # Chart: alpha[A, i, j] for span [i, j) (j exclusive)
     alpha = jnp.full((K, C + 1, C + 1), NEG_INF)
 
-    # Base case: spans of length 1 (terminal emissions)
-    for lhs, log_w, model_idx, n_pos in terminal_rules:
-        if n_pos == 1:
-            # Single emission at column i: span [i, i+1)
-            for i in range(C):
-                emit_w = tw.single[model_idx, i]
-                alpha = alpha.at[lhs, i, i + 1].set(
-                    jnp.logaddexp(alpha[lhs, i, i + 1], log_w + emit_w))
+    # Base case: epsilon productions (span length 0)
+    for lhs, log_w in epsilon_rules:
+        for i in range(C + 1):
+            alpha = alpha.at[lhs, i, i].set(
+                jnp.logaddexp(alpha[lhs, i, i], log_w))
 
-    # Fill chart bottom-up by span length
-    for span_len in range(2, C + 1):
+    # Propagate unary rules on epsilon spans (sorted order, single pass)
+    for lhs, rhs, log_w in sorted_unary:
+        for i in range(C + 1):
+            score = log_w + alpha[rhs, i, i]
+            alpha = alpha.at[lhs, i, i].set(
+                jnp.logaddexp(alpha[lhs, i, i], score))
+
+    # Fill chart bottom-up by span length (starting from 1)
+    for span_len in range(1, C + 1):
         for i in range(C - span_len + 1):
             j = i + span_len
+
+            # Terminal emission rules: A → e (span length 1 only)
+            if span_len == 1:
+                for lhs, log_w, model_idx, n_pos in terminal_rules:
+                    if n_pos == 1:
+                        emit_w = tw.single[model_idx, i]
+                        alpha = alpha.at[lhs, i, j].set(
+                            jnp.logaddexp(alpha[lhs, i, j], log_w + emit_w))
 
             # Left-emitting unary rules: A → e B(x), span [i, j) = emit i + B[i+1, j)
             for lhs, rhs, log_w, model_idx in emit_unary_rules:
@@ -124,8 +198,8 @@ def scfg_inside(cg, tw):
                     alpha = alpha.at[lhs, i, j].set(
                         jnp.logaddexp(alpha[lhs, i, j], score))
 
-            # Non-emitting unary rules: A → B
-            for lhs, rhs, log_w in unary_rules:
+            # Non-emitting unary rules: A → B (topologically sorted)
+            for lhs, rhs, log_w in sorted_unary:
                 score = log_w + alpha[rhs, i, j]
                 alpha = alpha.at[lhs, i, j].set(
                     jnp.logaddexp(alpha[lhs, i, j], score))
@@ -150,8 +224,11 @@ def scfg_outside(cg, tw, alpha):
     K = cg.n_nonterminals
     C = tw.C
 
-    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired = \
-        _classify_rules(cg, tw)
+    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired, \
+        epsilon_rules = _classify_rules(cg, tw)
+
+    # For outside, reverse the topo order (propagate from parents to children)
+    sorted_unary_rev = list(reversed(_topo_sort_unary(unary_rules, K)))
 
     beta = jnp.full((K, C + 1, C + 1), NEG_INF)
     # Start symbol spans the whole sequence
@@ -163,7 +240,7 @@ def scfg_outside(cg, tw, alpha):
             j = i + span_len
 
             # Non-emitting unary rules: A → B (parent A, child B)
-            for lhs, rhs, log_w in unary_rules:
+            for lhs, rhs, log_w in sorted_unary_rev:
                 score = beta[lhs, i, j] + log_w
                 beta = beta.at[rhs, i, j].set(
                     jnp.logaddexp(beta[rhs, i, j], score))
@@ -214,26 +291,43 @@ def scfg_viterbi(cg, tw):
     K = cg.n_nonterminals
     C = tw.C
 
-    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired = \
-        _classify_rules(cg, tw)
+    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired, \
+        epsilon_rules = _classify_rules(cg, tw)
+
+    sorted_unary = _topo_sort_unary(unary_rules, K)
 
     # Viterbi chart (max instead of logaddexp)
     v = jnp.full((K, C + 1, C + 1), NEG_INF)
     bp = {}  # backpointers: (A, i, j) → rule info
 
-    # Base case
-    for lhs, log_w, model_idx, n_pos in terminal_rules:
-        if n_pos == 1:
-            for i in range(C):
-                score = log_w + tw.single[model_idx, i]
-                if score > v[lhs, i, i + 1]:
-                    v = v.at[lhs, i, i + 1].set(score)
-                    bp[(lhs, i, i + 1)] = ('terminal', model_idx)
+    # Base case: epsilon productions (span length 0)
+    for lhs, log_w in epsilon_rules:
+        for i in range(C + 1):
+            if log_w > float(v[lhs, i, i]):
+                v = v.at[lhs, i, i].set(log_w)
+                bp[(lhs, i, i)] = ('epsilon',)
 
-    # Fill chart
-    for span_len in range(2, C + 1):
+    # Propagate unary rules on epsilon spans (sorted, single pass)
+    for lhs, rhs, log_w in sorted_unary:
+        for i in range(C + 1):
+            score = log_w + float(v[rhs, i, i])
+            if score > float(v[lhs, i, i]):
+                v = v.at[lhs, i, i].set(score)
+                bp[(lhs, i, i)] = ('unary', rhs)
+
+    # Fill chart bottom-up by span length (starting from 1)
+    for span_len in range(1, C + 1):
         for i in range(C - span_len + 1):
             j = i + span_len
+
+            # Terminal emissions (span length 1 only)
+            if span_len == 1:
+                for lhs, log_w, model_idx, n_pos in terminal_rules:
+                    if n_pos == 1:
+                        score = log_w + float(tw.single[model_idx, i])
+                        if score > float(v[lhs, i, j]):
+                            v = v.at[lhs, i, j].set(score)
+                            bp[(lhs, i, j)] = ('terminal', model_idx)
 
             # Left-emitting unary: A → e B
             for lhs, rhs, log_w, model_idx in emit_unary_rules:
@@ -260,7 +354,7 @@ def scfg_viterbi(cg, tw):
                         v = v.at[lhs, i, j].set(score)
                         bp[(lhs, i, j)] = ('binary', rhs0, rhs1, k)
 
-            for lhs, rhs, log_w in unary_rules:
+            for lhs, rhs, log_w in sorted_unary:
                 score = log_w + float(v[rhs, i, j])
                 if score > float(v[lhs, i, j]):
                     v = v.at[lhs, i, j].set(score)
