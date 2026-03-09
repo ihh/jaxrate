@@ -24,6 +24,7 @@ grammar = gb.build(start=S, n_models=1)
 ### Rule anatomy
 
 A `Rule` has:
+
 - **lhs**: Left-hand side nonterminal index
 - **rhs**: Tuple of right-hand side nonterminal indices
 - **emissions**: Tuple of `EmissionGroup(n_positions, model_index)`
@@ -32,6 +33,7 @@ A `Rule` has:
 ### Grammar classification
 
 jaxrate auto-classifies grammars:
+
 - **HMM**: All rules have ≤1 RHS nonterminal (right-linear)
 - **SCFG**: All nonterminals have fan-out 1, but some rules are binary
 - **MCFG**: Any nonterminal has fan-out > 1

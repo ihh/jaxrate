@@ -34,6 +34,7 @@ NAV = [
     ("Guide", [
         ("Home", "index.md"),
         ("Tutorial", "tutorial.md"),
+        ("API Reference", "api.md"),
     ]),
 ]
 
@@ -146,6 +147,7 @@ def render_page(md_text, current_path, title):
     <nav>
       <a href="{prefix}index.html">Home</a>
       <a href="{prefix}tutorial.html">Tutorial</a>
+      <a href="{prefix}api.html">API</a>
       <a href="https://github.com/ihh/jaxrate">GitHub</a>
     </nav>
   </header>
