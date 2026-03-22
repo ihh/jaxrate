@@ -641,3 +641,28 @@ class TestMacroGrammarParsing:
         g = result.grammar
         assert classify_grammar(g) == 'hmm'
         validate_grammar(g)
+
+    def test_xdecoder(self):
+        """Parse XDecoder.eg — RNA structure in coding regions."""
+        xdecoder_path = os.path.join(DATA_DIR, 'XDecoder.eg')
+        result = parse_xrate_file(xdecoder_path)
+
+        # 24 chains total: 12 non-structural + 3 loop + 9 paired
+        assert len(result.chains) == 24
+        single = [c for c in result.chains if c['n_positions'] == 1]
+        paired = [c for c in result.chains if c['n_positions'] == 2]
+        assert len(single) == 15
+        assert len(paired) == 9
+
+        # Grammar properties
+        g = result.grammar
+        assert len(g.nonterminals) == 86
+        assert len(g.rules) == 149
+        assert classify_grammar(g) == 'scfg'
+        validate_grammar(g)
+
+        # Should have structural nonterminals
+        nt_names = [nt.name for nt in g.nonterminals]
+        assert 'begin' in nt_names
+        assert 'pfoldCodingS' in nt_names
+        assert 'pfoldCodingB' in nt_names
