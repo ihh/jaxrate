@@ -38,7 +38,7 @@ from .presets import (
     pseudoknot_grammar,
 )
 
-from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar
+from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar, expand_macros
 
 from .nj import (
     neighbor_joining,

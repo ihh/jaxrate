@@ -6,6 +6,7 @@ jaxrate Grammar + subby-compatible substitution model specifications.
 Reference: https://github.com/ihh/dart/blob/master/doc/XrateFormat.txt
 """
 
+import copy
 import math
 import re
 from typing import Optional
@@ -91,6 +92,400 @@ def parse_sexpr(text):
 
 
 # ---------------------------------------------------------------------------
+# Macro expander (xrate preprocessor)
+# ---------------------------------------------------------------------------
+# Three-pass expansion matching the C++ svisitor pipeline:
+#   Pass 1 (preorder):  &define, &foreach-integer, &foreach-token, &foreach
+#   Pass 2 (postorder): &cat/&., &sum/&+, &sub/&-, &mul/&*, &div/&/,
+#                        &mod/&%, &if/&?, &eq/&=, &neq/&!=, &gt/&>,
+#                        &lt/&<, &geq/&>=, &leq/&<=, &and, &or, &not,
+#                        &int, &chr, &ord
+#   Pass 3:             &scheme (stub — raises for unsupported expressions)
+
+# Operator aliases (short → canonical)
+_OP_ALIASES = {
+    '&.': '&cat', '&+': '&sum', '&-': '&sub', '&*': '&mul',
+    '&/': '&div', '&%': '&mod', '&?': '&if', '&=': '&eq',
+    '&!=': '&neq', '&>': '&gt', '&<': '&lt', '&>=': '&geq',
+    '&<=': '&leq',
+}
+
+
+def _deep_copy(expr):
+    """Deep copy an S-expression tree (nested lists + atoms)."""
+    if isinstance(expr, list):
+        return [_deep_copy(x) for x in expr]
+    return expr
+
+
+def _substitute(expr, var, value):
+    """Replace all occurrences of atom `var` with `value` in expr."""
+    if isinstance(expr, list):
+        return [_substitute(x, var, value) for x in expr]
+    if expr == var:
+        return _deep_copy(value)
+    return expr
+
+
+def _substitute_multi(expr, bindings):
+    """Replace multiple atom→value bindings in expr."""
+    if isinstance(expr, list):
+        return [_substitute_multi(x, bindings) for x in expr]
+    if expr in bindings:
+        return _deep_copy(bindings[expr])
+    return expr
+
+
+def _flatten_splices(lst):
+    """Flatten any _Splice markers from foreach expansion."""
+    result = []
+    for item in lst:
+        if isinstance(item, _Splice):
+            result.extend(item.items)
+        elif isinstance(item, list):
+            result.append(_flatten_splices(item))
+        else:
+            result.append(item)
+    return result
+
+
+class _Splice:
+    """Marker for items that should be spliced into the parent list."""
+    __slots__ = ('items',)
+    def __init__(self, items):
+        self.items = items
+
+
+def _pass1_preorder(expr, defines=None, alphabet_tokens=None):
+    """Pass 1: expand &define, &foreach-integer, &foreach-token, &foreach.
+
+    Operates top-down (preorder). &define adds to the defines dict.
+    &foreach* expands by cloning the template body for each iteration value.
+
+    Args:
+        expr: S-expression (nested lists + atoms)
+        defines: dict of atom → replacement value (mutated in place)
+        alphabet_tokens: list of alphabet token strings (for &foreach-token, &TOKENS)
+
+    Returns:
+        Expanded expression, or _Splice for multi-element expansions.
+    """
+    if defines is None:
+        defines = {}
+    if alphabet_tokens is None:
+        alphabet_tokens = []
+
+    # Atom: substitute defines and &TOKENS
+    if not isinstance(expr, list):
+        if expr == '&TOKENS':
+            return len(alphabet_tokens)
+        if expr in defines:
+            return _deep_copy(defines[expr])
+        return expr
+
+    if len(expr) == 0:
+        return expr
+
+    head = expr[0]
+
+    # &define VAR VALUE — store binding, return empty splice
+    if head == '&define' and len(expr) == 3:
+        var = expr[1]
+        val = _pass1_preorder(expr[2], defines, alphabet_tokens)
+        defines[var] = val
+        return _Splice([])
+
+    # &foreach-integer VAR (LO HI) BODY...
+    if head == '&foreach-integer' and len(expr) >= 4:
+        var = expr[1]
+        range_expr = _pass1_preorder(expr[2], defines, alphabet_tokens)
+        lo = int(range_expr[0]) if isinstance(range_expr, list) else int(range_expr)
+        hi = int(range_expr[1]) if isinstance(range_expr, list) else int(range_expr)
+        body_templates = expr[3:]
+        results = []
+        for i in range(lo, hi + 1):
+            child_defines = dict(defines)
+            child_defines[var] = i
+            for tmpl in body_templates:
+                expanded = _pass1_preorder(
+                    _substitute(tmpl, var, i), child_defines, alphabet_tokens)
+                if isinstance(expanded, _Splice):
+                    results.extend(expanded.items)
+                else:
+                    results.append(expanded)
+        return _Splice(results)
+
+    # &foreach-token VAR BODY...
+    if head == '&foreach-token' and len(expr) >= 3:
+        var = expr[1]
+        body_templates = expr[2:]
+        results = []
+        for tok in alphabet_tokens:
+            child_defines = dict(defines)
+            child_defines[var] = tok
+            for tmpl in body_templates:
+                expanded = _pass1_preorder(
+                    _substitute(tmpl, var, tok), child_defines, alphabet_tokens)
+                if isinstance(expanded, _Splice):
+                    results.extend(expanded.items)
+                else:
+                    results.append(expanded)
+        return _Splice(results)
+
+    # &foreach VAR (LIST...) BODY...
+    if head == '&foreach' and len(expr) >= 4:
+        var = expr[1]
+        values_expr = _pass1_preorder(expr[2], defines, alphabet_tokens)
+        if not isinstance(values_expr, list):
+            values_expr = [values_expr]
+        body_templates = expr[3:]
+        results = []
+        for val in values_expr:
+            child_defines = dict(defines)
+            child_defines[var] = val
+            for tmpl in body_templates:
+                expanded = _pass1_preorder(
+                    _substitute(tmpl, var, val), child_defines, alphabet_tokens)
+                if isinstance(expanded, _Splice):
+                    results.extend(expanded.items)
+                else:
+                    results.append(expanded)
+        return _Splice(results)
+
+    # Regular list: recurse into children, then flatten splices
+    result = []
+    for child in expr:
+        expanded = _pass1_preorder(child, defines, alphabet_tokens)
+        if isinstance(expanded, _Splice):
+            result.extend(expanded.items)
+        else:
+            result.append(expanded)
+    return result
+
+
+def _to_num(x):
+    """Coerce an atom to a number (int or float)."""
+    if isinstance(x, (int, float)):
+        return x
+    try:
+        return int(x)
+    except (ValueError, TypeError):
+        try:
+            return float(x)
+        except (ValueError, TypeError):
+            raise ValueError(f"Cannot convert {x!r} to number")
+
+
+def _pass2_postorder(expr):
+    """Pass 2: evaluate arithmetic, concatenation, and conditionals.
+
+    Operates bottom-up (postorder). Each operator consumes its arguments
+    from the same list.
+    """
+    if not isinstance(expr, list):
+        return expr
+
+    # First recurse into children
+    expr = [_pass2_postorder(child) for child in expr]
+
+    if len(expr) == 0:
+        return expr
+
+    head = expr[0]
+    # Resolve alias
+    if isinstance(head, str):
+        head = _OP_ALIASES.get(head, head)
+
+    # &cat / &. — string concatenation
+    if head == '&cat':
+        return ''.join(str(x) for x in expr[1:])
+
+    # &sum / &+ — addition
+    if head == '&sum':
+        return sum(_to_num(x) for x in expr[1:])
+
+    # &sub / &- — subtraction
+    if head == '&sub' and len(expr) >= 3:
+        result = _to_num(expr[1])
+        for x in expr[2:]:
+            result -= _to_num(x)
+        return result
+
+    # &mul / &* — multiplication
+    if head == '&mul':
+        result = 1
+        for x in expr[1:]:
+            result *= _to_num(x)
+        return result
+
+    # &div / &/ — division
+    if head == '&div' and len(expr) >= 3:
+        result = _to_num(expr[1])
+        for x in expr[2:]:
+            result = result / _to_num(x)
+        return result
+
+    # &mod / &% — modulus
+    if head == '&mod' and len(expr) == 3:
+        return _to_num(expr[1]) % _to_num(expr[2])
+
+    # &eq / &= — equality
+    if head == '&eq' and len(expr) == 3:
+        return 1 if expr[1] == expr[2] else 0
+
+    # &neq / &!= — inequality
+    if head == '&neq' and len(expr) == 3:
+        return 1 if expr[1] != expr[2] else 0
+
+    # &gt / &> — greater than
+    if head == '&gt' and len(expr) == 3:
+        return 1 if _to_num(expr[1]) > _to_num(expr[2]) else 0
+
+    # &lt / &< — less than
+    if head == '&lt' and len(expr) == 3:
+        return 1 if _to_num(expr[1]) < _to_num(expr[2]) else 0
+
+    # &geq / &>= — greater or equal
+    if head == '&geq' and len(expr) == 3:
+        return 1 if _to_num(expr[1]) >= _to_num(expr[2]) else 0
+
+    # &leq / &<= — less or equal
+    if head == '&leq' and len(expr) == 3:
+        return 1 if _to_num(expr[1]) <= _to_num(expr[2]) else 0
+
+    # &if / &? — conditional (test, then, else)
+    if head == '&if' and len(expr) == 4:
+        test = expr[1]
+        if isinstance(test, (int, float)):
+            cond = test != 0
+        elif isinstance(test, str):
+            cond = test not in ('0', '', 'false')
+        else:
+            cond = bool(test)
+        return expr[2] if cond else expr[3]
+
+    # &and — logical and
+    if head == '&and':
+        return 1 if all(_to_num(x) != 0 for x in expr[1:]) else 0
+
+    # &or — logical or
+    if head == '&or':
+        return 1 if any(_to_num(x) != 0 for x in expr[1:]) else 0
+
+    # &not — logical not
+    if head == '&not' and len(expr) == 2:
+        return 0 if _to_num(expr[1]) != 0 else 1
+
+    # &int — convert to integer
+    if head == '&int' and len(expr) == 2:
+        return int(_to_num(expr[1]))
+
+    # &chr — integer to character
+    if head == '&chr' and len(expr) == 2:
+        return chr(int(_to_num(expr[1])))
+
+    # &ord — character to integer
+    if head == '&ord' and len(expr) == 2:
+        val = expr[1]
+        if isinstance(val, str) and len(val) == 1:
+            return ord(val)
+        return int(_to_num(val))
+
+    return expr
+
+
+def _pass3_scheme(expr):
+    """Pass 3: handle &scheme directives (stub).
+
+    Raises NotImplementedError for &scheme expressions.
+    Silently discards &scheme-discard.
+    """
+    if not isinstance(expr, list):
+        return expr
+
+    if len(expr) > 0:
+        head = expr[0]
+        if head == '&scheme':
+            raise NotImplementedError(
+                "Guile Scheme evaluation (&scheme) is not supported. "
+                "Use pre-expanded grammar files instead.")
+        if head == '&scheme-discard':
+            return _Splice([])
+
+    result = []
+    for child in expr:
+        expanded = _pass3_scheme(child)
+        if isinstance(expanded, _Splice):
+            result.extend(expanded.items)
+        else:
+            result.append(expanded)
+    return result
+
+
+def _extract_alphabet_tokens(exprs):
+    """Extract alphabet tokens from parsed S-expressions (pre-expansion).
+
+    Scans for (alphabet ... (token (a c g u)) ...) to provide token list
+    for &foreach-token and &TOKENS before full expansion.
+    """
+    for expr in exprs:
+        if isinstance(expr, list) and len(expr) > 0 and expr[0] == 'alphabet':
+            tok_expr = _find1(expr, 'token')
+            if tok_expr is not None:
+                if isinstance(tok_expr[1], list):
+                    return [str(t) for t in tok_expr[1]]
+                else:
+                    return [str(t) for t in tok_expr[1:]]
+    return []
+
+
+def expand_macros(exprs, alphabet_tokens=None):
+    """Expand xrate macro directives in parsed S-expressions.
+
+    Implements the three-pass xrate macro expansion pipeline:
+      1. &define, &foreach-integer, &foreach-token, &foreach (preorder)
+      2. &cat, &sum, &sub, &mul, &div, &if, &eq, etc. (postorder)
+      3. &scheme (stub — raises if encountered)
+
+    Args:
+        exprs: list of top-level S-expressions (from parse_sexpr)
+        alphabet_tokens: optional list of alphabet token strings.
+            If None, extracted automatically from (alphabet ...) block.
+
+    Returns:
+        Expanded list of S-expressions.
+    """
+    if alphabet_tokens is None:
+        alphabet_tokens = _extract_alphabet_tokens(exprs)
+
+    # Wrap in a container list for uniform processing
+    container = ['__top__'] + exprs
+
+    # Pass 1: preorder macro expansion
+    defines = {}
+    container = _pass1_preorder(container, defines, alphabet_tokens)
+    if isinstance(container, _Splice):
+        container = ['__top__'] + container.items
+    container = _flatten_splices(container)
+
+    # Pass 2: postorder arithmetic/concatenation
+    container = _pass2_postorder(container)
+    if not isinstance(container, list):
+        container = [container]
+
+    # Pass 3: scheme stubs
+    container = _pass3_scheme(container)
+    if isinstance(container, _Splice):
+        container = ['__top__'] + container.items
+    container = _flatten_splices(container)
+
+    # Unwrap
+    if isinstance(container, list) and len(container) > 0 and container[0] == '__top__':
+        return container[1:]
+    return container if isinstance(container, list) else [container]
+
+
+# ---------------------------------------------------------------------------
 # Helper to extract named fields from S-expression lists
 # ---------------------------------------------------------------------------
 
@@ -148,11 +543,123 @@ def _parse_alphabet(alpha_sexpr):
 
 
 # ---------------------------------------------------------------------------
+# Parametric expression evaluator
+# ---------------------------------------------------------------------------
+
+def _parse_params(grammar_sexpr):
+    """Extract parameter bindings from (pgroup ...) and (rate ...) blocks.
+
+    Returns:
+        dict mapping parameter name → float value
+    """
+    params = {}
+
+    # (pgroup ((p1 val1) (p2 val2)) ((p3 val3) (p4 val4)) ...)
+    for pg in _find(grammar_sexpr, 'pgroup'):
+        for group in pg[1:]:
+            if isinstance(group, list):
+                for item in group:
+                    if isinstance(item, list) and len(item) == 2:
+                        name, val = item
+                        if isinstance(name, str):
+                            try:
+                                params[name] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+
+    # (rate (R val) (lambda val) ...)
+    for rg in _find(grammar_sexpr, 'rate'):
+        for item in rg[1:]:
+            if isinstance(item, list) and len(item) == 2:
+                name, val = item
+                if isinstance(name, str):
+                    try:
+                        params[name] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+
+    return params
+
+
+def _eval_parametric(expr, params):
+    """Evaluate a parametric expression using parameter bindings.
+
+    Handles:
+        - numeric literals: 0.5 → 0.5
+        - parameter names: stayProb → params['stayProb']
+        - infix arithmetic: (a * b), (a / b), (a + b), (a - b)
+        - nested S-expr: (param) → params['param']
+
+    Args:
+        expr: a value from prob/rate field — number, string, or list
+        params: dict of parameter name → float
+
+    Returns:
+        float value, or None if unevaluable
+    """
+    if isinstance(expr, (int, float)):
+        return float(expr)
+
+    if isinstance(expr, str):
+        if expr in params:
+            return params[expr]
+        try:
+            return float(expr)
+        except ValueError:
+            return None
+
+    if isinstance(expr, list):
+        # Empty list
+        if len(expr) == 0:
+            return None
+
+        # Single element: (param_name) → resolve
+        if len(expr) == 1:
+            return _eval_parametric(expr[0], params)
+
+        # Infix binary: (a OP b) or (a OP b OP c ...)
+        # Process left-to-right: a OP1 b OP2 c → ((a OP1 b) OP2 c)
+        if len(expr) >= 3 and isinstance(expr[1], str) and expr[1] in ('*', '/', '+', '-'):
+            result = _eval_parametric(expr[0], params)
+            if result is None:
+                return None
+            i = 1
+            while i < len(expr) - 1:
+                op = expr[i]
+                right = _eval_parametric(expr[i + 1], params)
+                if right is None:
+                    return None
+                if op == '*':
+                    result *= right
+                elif op == '/':
+                    result = result / right if right != 0 else 0.0
+                elif op == '+':
+                    result += right
+                elif op == '-':
+                    result -= right
+                i += 2
+            return result
+
+        # Two elements without operator: try first as value
+        if len(expr) == 2:
+            v = _eval_parametric(expr[0], params)
+            if v is not None:
+                return v
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Chain (substitution model) extraction
 # ---------------------------------------------------------------------------
 
-def _parse_chain(chain_sexpr, alphabet_tokens):
+def _parse_chain(chain_sexpr, alphabet_tokens, params=None):
     """Parse a (chain ...) S-expression into a substitution model spec.
+
+    Args:
+        chain_sexpr: the (chain ...) S-expression
+        alphabet_tokens: list of alphabet token strings
+        params: dict of parametric parameter bindings (from pgroup/rate)
 
     Returns:
         dict with:
@@ -163,6 +670,8 @@ def _parse_chain(chain_sexpr, alphabet_tokens):
             'rate_matrix': (A, A) or (A^2, A^2) numpy array — rate matrix Q
             'alphabet_size': A (base alphabet size, e.g. 4 for RNA)
     """
+    if params is None:
+        params = {}
     A = len(alphabet_tokens)
     tok_to_idx = {t: i for i, t in enumerate(alphabet_tokens)}
 
@@ -192,7 +701,10 @@ def _parse_chain(chain_sexpr, alphabet_tokens):
     pi = np.zeros(state_size, dtype=np.float64)
     for init_expr in _find(chain_sexpr, 'initial'):
         state_expr = _find1(init_expr, 'state')
-        prob_val = _get_value(init_expr, 'prob', 0.0)
+        prob_raw = _get_value(init_expr, 'prob', 0.0)
+        prob_val = _eval_parametric(prob_raw, params)
+        if prob_val is None:
+            prob_val = 0.0
         if state_expr is not None:
             if isinstance(state_expr[1], list):
                 state_toks = [str(t) for t in state_expr[1]]
@@ -211,7 +723,10 @@ def _parse_chain(chain_sexpr, alphabet_tokens):
     for mut_expr in _find(chain_sexpr, 'mutate'):
         from_expr = _find1(mut_expr, 'from')
         to_expr = _find1(mut_expr, 'to')
-        rate_val = _get_value(mut_expr, 'rate', 0.0)
+        rate_raw = _get_value(mut_expr, 'rate', 0.0)
+        rate_val = _eval_parametric(rate_raw, params)
+        if rate_val is None:
+            rate_val = 0.0
 
         if from_expr is not None and to_expr is not None:
             if isinstance(from_expr[1], list):
@@ -245,12 +760,13 @@ def _parse_chain(chain_sexpr, alphabet_tokens):
 # Transform (production rule) extraction
 # ---------------------------------------------------------------------------
 
-def _parse_transforms(grammar_sexpr, chains):
+def _parse_transforms(grammar_sexpr, chains, params=None):
     """Parse transform rules from an xrate grammar S-expression.
 
     Args:
         grammar_sexpr: the (grammar ...) S-expression
         chains: list of parsed chain dicts (from _parse_chain)
+        params: dict of parametric parameter bindings
 
     Returns:
         (Grammar, chain_to_model_index) where chain_to_model_index maps
@@ -359,9 +875,15 @@ def _parse_transforms(grammar_sexpr, chains):
             to_syms = [str(s) for s in to_expr[1:]]
 
         # Get probability/weight
-        prob_val = _get_value(tf, 'prob')
-        if prob_val is not None:
-            log_weight = math.log(float(prob_val)) if float(prob_val) > 0 else -1e38
+        prob_raw = _get_value(tf, 'prob')
+        if prob_raw is not None:
+            if params is None:
+                params = {}
+            prob_val = _eval_parametric(prob_raw, params)
+            if prob_val is not None and prob_val > 0:
+                log_weight = math.log(prob_val)
+            else:
+                log_weight = -1e38
         else:
             log_weight = 0.0  # implicit 1.0
 
@@ -548,6 +1070,9 @@ def parse_xrate(text, start_nonterminal=None):
     """
     exprs = parse_sexpr(text)
 
+    # Expand macros (&define, &foreach-*, &cat, &+, etc.)
+    exprs = expand_macros(exprs)
+
     # Find alphabet and grammar blocks
     alphabet_expr = None
     grammar_expr = None
@@ -568,12 +1093,15 @@ def parse_xrate(text, start_nonterminal=None):
         alphabet = {'name': 'RNA', 'tokens': ['a', 'c', 'g', 'u'],
                      'complement': None}
 
+    # Parse parametric parameters (pgroup, rate)
+    params = _parse_params(grammar_expr)
+
     # Parse chains
     chain_exprs = _find(grammar_expr, 'chain')
-    chains = [_parse_chain(ce, alphabet['tokens']) for ce in chain_exprs]
+    chains = [_parse_chain(ce, alphabet['tokens'], params) for ce in chain_exprs]
 
     # Parse transforms into grammar
-    grammar, chain_to_model = _parse_transforms(grammar_expr, chains)
+    grammar, chain_to_model = _parse_transforms(grammar_expr, chains, params)
 
     # Set start nonterminal if specified
     if start_nonterminal is not None:

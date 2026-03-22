@@ -7,7 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxrate.xrate_parser import parse_xrate, parse_xrate_file, parse_sexpr
+from jaxrate.xrate_parser import (
+    parse_xrate, parse_xrate_file, parse_sexpr, expand_macros,
+    _eval_parametric,
+)
 from jaxrate.grammar import classify_grammar, validate_grammar, compile_grammar
 from jaxrate.types import TerminalWeights
 
@@ -327,3 +330,314 @@ class TestEdgeCases:
         """
         with pytest.raises(ValueError, match="not found"):
             parse_xrate(text, start_nonterminal='NONEXISTENT')
+
+
+# ---------------------------------------------------------------------------
+# Macro expansion unit tests
+# ---------------------------------------------------------------------------
+
+class TestMacroExpansion:
+    def test_define(self):
+        exprs = parse_sexpr("(&define N 5) (value N)")
+        result = expand_macros(exprs)
+        assert result == [['value', 5]]
+
+    def test_define_string(self):
+        exprs = parse_sexpr("(&define NAME hello) (tag NAME)")
+        result = expand_macros(exprs)
+        assert result == [['tag', 'hello']]
+
+    def test_foreach_integer(self):
+        exprs = parse_sexpr("(&foreach-integer I (1 3) (item I))")
+        result = expand_macros(exprs)
+        assert result == [['item', 1], ['item', 2], ['item', 3]]
+
+    def test_foreach_integer_with_define(self):
+        exprs = parse_sexpr("(&define N 3) (&foreach-integer I (1 N) (item I))")
+        result = expand_macros(exprs)
+        assert result == [['item', 1], ['item', 2], ['item', 3]]
+
+    def test_foreach_token(self):
+        exprs = parse_sexpr(
+            "(alphabet (name DNA) (token (a c g t)))"
+            " (grammar (&foreach-token X (state X)))")
+        result = expand_macros(exprs)
+        grammar = result[1]
+        states = [x for x in grammar if isinstance(x, list) and x[0] == 'state']
+        assert len(states) == 4
+        assert states[0] == ['state', 'a']
+        assert states[3] == ['state', 't']
+
+    def test_tokens_count(self):
+        exprs = parse_sexpr(
+            "(alphabet (name RNA) (token (a c g u)))"
+            " (count &TOKENS)")
+        result = expand_macros(exprs)
+        assert result[1] == ['count', 4]
+
+    def test_cat(self):
+        exprs = parse_sexpr("((&. hello world))")
+        result = expand_macros(exprs)
+        assert result == [['helloworld']]
+
+    def test_cat_with_numbers(self):
+        exprs = parse_sexpr("((&. S 1))")
+        result = expand_macros(exprs)
+        assert result == [['S1']]
+
+    def test_sum(self):
+        exprs = parse_sexpr("((&+ 1 2 3))")
+        result = expand_macros(exprs)
+        assert result == [[6]]
+
+    def test_sub(self):
+        exprs = parse_sexpr("((&- 10 3))")
+        result = expand_macros(exprs)
+        assert result == [[7]]
+
+    def test_mul(self):
+        exprs = parse_sexpr("((&* 3 4))")
+        result = expand_macros(exprs)
+        assert result == [[12]]
+
+    def test_div(self):
+        exprs = parse_sexpr("((&/ 1 3))")
+        result = expand_macros(exprs)
+        assert len(result) == 1
+        assert len(result[0]) == 1
+        assert abs(result[0][0] - 1/3) < 1e-10
+
+    def test_mod(self):
+        exprs = parse_sexpr("((&% 7 3))")
+        result = expand_macros(exprs)
+        assert result == [[1]]
+
+    def test_eq_true(self):
+        exprs = parse_sexpr("((&= 5 5))")
+        result = expand_macros(exprs)
+        assert result == [[1]]
+
+    def test_eq_false(self):
+        exprs = parse_sexpr("((&= 5 3))")
+        result = expand_macros(exprs)
+        assert result == [[0]]
+
+    def test_if_true(self):
+        exprs = parse_sexpr("(&? 1 yes no)")
+        result = expand_macros(exprs)
+        assert result == ['yes']
+
+    def test_if_false(self):
+        exprs = parse_sexpr("(&? 0 yes no)")
+        result = expand_macros(exprs)
+        assert result == ['no']
+
+    def test_if_eq_combined(self):
+        exprs = parse_sexpr("(&? (&= 1 1) yes no)")
+        result = expand_macros(exprs)
+        assert result == ['yes']
+
+    def test_chr(self):
+        exprs = parse_sexpr("((&chr 65))")
+        result = expand_macros(exprs)
+        assert result == [['A']]
+
+    def test_ord(self):
+        exprs = parse_sexpr("((&ord A))")
+        result = expand_macros(exprs)
+        assert result == [[65]]
+
+    def test_nested_foreach(self):
+        """Nested foreach-integer should produce cross product."""
+        exprs = parse_sexpr(
+            "(&foreach-integer I (1 2) (&foreach-integer J (1 2) (pair I J)))")
+        result = expand_macros(exprs)
+        assert result == [['pair', 1, 1], ['pair', 1, 2],
+                          ['pair', 2, 1], ['pair', 2, 2]]
+
+    def test_foreach_with_cat(self):
+        """foreach-integer body containing &cat."""
+        exprs = parse_sexpr(
+            "(&foreach-integer I (1 3) (item (&. S I)))")
+        result = expand_macros(exprs)
+        assert result == [['item', 'S1'], ['item', 'S2'], ['item', 'S3']]
+
+    def test_foreach_with_conditional_skip(self):
+        """foreach with &? &= to conditionally emit empty."""
+        exprs = parse_sexpr(
+            "(&foreach-integer I (1 3) (&? (&= I 2) () (keep I)))")
+        result = expand_macros(exprs)
+        assert ['keep', 1] in result
+        assert ['keep', 3] in result
+
+    def test_foreach(self):
+        """Basic &foreach over explicit list."""
+        exprs = parse_sexpr("(&foreach X (a b c) (item X))")
+        result = expand_macros(exprs)
+        assert result == [['item', 'a'], ['item', 'b'], ['item', 'c']]
+
+    def test_and_or_not(self):
+        exprs = parse_sexpr("((&and 1 1) (&and 1 0) (&or 0 1) (&not 0))")
+        result = expand_macros(exprs)
+        assert result == [[1, 0, 1, 1]]
+
+    def test_comparison_operators(self):
+        exprs = parse_sexpr("((&> 3 2) (&< 3 2) (&>= 3 3) (&<= 2 3))")
+        result = expand_macros(exprs)
+        assert result == [[1, 0, 1, 1]]
+
+    def test_scheme_raises(self):
+        exprs = parse_sexpr("(&scheme (+ 1 2))")
+        with pytest.raises(NotImplementedError, match="Guile Scheme"):
+            expand_macros(exprs)
+
+    def test_no_macros_passthrough(self):
+        """Expressions without macros should pass through unchanged."""
+        exprs = parse_sexpr("(grammar (name test) (transform (from (S)) (to ())))")
+        result = expand_macros(exprs)
+        assert result == exprs
+
+
+# ---------------------------------------------------------------------------
+# Parametric expression evaluator tests
+# ---------------------------------------------------------------------------
+
+class TestParametricExpressions:
+    def test_numeric_literal(self):
+        assert _eval_parametric(0.5, {}) == 0.5
+
+    def test_parameter_lookup(self):
+        assert _eval_parametric('stayProb', {'stayProb': 0.9}) == 0.9
+
+    def test_infix_multiply(self):
+        params = {'lambda': 1.5, 'pA': 0.25}
+        assert _eval_parametric(['lambda', '*', 'pA'], params) == pytest.approx(0.375)
+
+    def test_infix_divide(self):
+        result = _eval_parametric(['leaveProb', '/', 9], {'leaveProb': 0.1})
+        assert result == pytest.approx(0.1 / 9)
+
+    def test_infix_chain(self):
+        # lambda * (CLASS / CLASSES) * pA
+        params = {'lambda': 1.0, 'pA': 0.25}
+        expr = ['lambda', '*', 0.5, '*', 'pA']
+        assert _eval_parametric(expr, params) == pytest.approx(0.125)
+
+    def test_single_element_list(self):
+        assert _eval_parametric(['stayProb'], {'stayProb': 0.9}) == 0.9
+
+    def test_unknown_returns_none(self):
+        assert _eval_parametric('unknown', {}) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end macro grammar tests
+# ---------------------------------------------------------------------------
+
+class TestMacroGrammarParsing:
+    def test_conservation_phylohmm(self):
+        """Parse conservation_phylohmm.eg — 10-class parametric HMM."""
+        text = open('/tmp/xrate_examples/conservation_phylohmm.eg').read()
+        result = parse_xrate(text)
+
+        # Should have 10 chains (one per rate class)
+        assert len(result.chains) == 10
+
+        # Chain terminals should be X1..X10
+        chain_terminals = [c['terminals'][0] for c in result.chains]
+        for i in range(1, 11):
+            assert f'X{i}' in chain_terminals
+
+        # All chains should be single-position
+        for c in result.chains:
+            assert c['n_positions'] == 1
+
+        # Grammar should have nonterminals START, S1..S10, S1*..S10*
+        g = result.grammar
+        nt_names = [nt.name for nt in g.nonterminals]
+        assert 'START' in nt_names
+        for i in range(1, 11):
+            assert f'S{i}' in nt_names
+            assert f'S{i}*' in nt_names
+
+        # Should classify as HMM
+        assert classify_grammar(g) == 'hmm'
+        validate_grammar(g)
+
+    def test_conservation_phylohmm_chains_have_rates(self):
+        """Verify expanded chains have non-trivial rate matrices."""
+        text = open('/tmp/xrate_examples/conservation_phylohmm.eg').read()
+        result = parse_xrate(text)
+
+        # Rate class 10 (fastest) should have higher rates than class 1 (slowest)
+        chain1 = next(c for c in result.chains if c['terminals'] == ['X1'])
+        chain10 = next(c for c in result.chains if c['terminals'] == ['X10'])
+
+        # Off-diagonal sum should be higher for class 10
+        off_diag_1 = np.abs(chain1['rate_matrix']).sum() - np.abs(
+            np.diag(chain1['rate_matrix'])).sum()
+        off_diag_10 = np.abs(chain10['rate_matrix']).sum() - np.abs(
+            np.diag(chain10['rate_matrix'])).sum()
+        assert off_diag_10 > off_diag_1
+
+    def test_overprinter_div(self):
+        """Parse overprinter.eg — uses &div for 1/3 probability."""
+        text = open('/tmp/xrate_examples/overprinter.eg').read()
+        result = parse_xrate(text)
+
+        # Should parse without errors
+        assert len(result.chains) > 0
+        assert len(result.grammar.rules) > 0
+
+        # Find the chain with 1/3 initial probabilities
+        found_third = False
+        for chain in result.chains:
+            for pi_val in chain['pi']:
+                if abs(pi_val - 1/3) < 0.01:
+                    found_third = True
+                    break
+        assert found_third, "Should find chain with 1/3 initial probability"
+
+    def test_inline_macro_grammar(self):
+        """Parse an inline grammar with &define and &foreach-integer."""
+        text = """
+        (&define N 3)
+        (alphabet (name RNA) (token (a c g u)))
+        (grammar
+         (name test_macro)
+         (&foreach-integer I (1 N)
+          (chain
+           (terminal ((&. X I)))
+           (&foreach-token TOK
+            (initial (state (TOK)) (prob (&/ 1 &TOKENS))))
+           (&foreach-token SRC
+            (&foreach-token DEST
+             (&? (&= SRC DEST) ()
+              (mutate (from (SRC)) (to (DEST)) (rate (&/ I N))))))))
+         (&foreach-integer I (1 N)
+          (transform (from (START)) (to ((&. S I))) (prob (&/ 1 N)))
+          (transform (from ((&. S I))) (to ((&. X I) (&. S I *))))
+          (transform (from ((&. S I *))) (to ()) (prob 1))))
+        """
+        result = parse_xrate(text)
+
+        # 3 chains: X1, X2, X3
+        assert len(result.chains) == 3
+        assert result.chains[0]['terminals'] == ['X1']
+        assert result.chains[2]['terminals'] == ['X3']
+
+        # Each chain has uniform pi
+        for c in result.chains:
+            np.testing.assert_allclose(c['pi'], 0.25, atol=1e-10)
+
+        # Rate matrices should scale: X3 has highest rates
+        off_diag = []
+        for c in result.chains:
+            Q = c['rate_matrix']
+            off_diag.append(Q[0, 1])
+        assert off_diag[0] < off_diag[1] < off_diag[2]
+
+        # Grammar should classify as HMM
+        g = result.grammar
+        assert classify_grammar(g) == 'hmm'
+        validate_grammar(g)
