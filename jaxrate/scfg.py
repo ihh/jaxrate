@@ -276,6 +276,74 @@ def scfg_outside(cg, tw, alpha):
     return beta
 
 
+def scfg_posteriors(cg, tw):
+    """Compute per-column posterior nonterminal probabilities via inside-outside.
+
+    For each column c, computes P(nonterminal k emits at column c | sequence).
+    This is derived from the inside-outside charts: for each emitting rule
+    that touches column c, the posterior contribution is
+    exp(alpha[child, i', j'] + beta[lhs, i, j] + log_w + emit_w - log_Z).
+
+    Args:
+        cg: CompiledGrammar (must be 'scfg' class)
+        tw: TerminalWeights
+
+    Returns:
+        posteriors: (C, K) — P(nonterminal k emits at column c | x_{1:C})
+        log_likelihood: scalar
+    """
+    K = cg.n_nonterminals
+    C = tw.C
+
+    alpha, log_Z = scfg_inside(cg, tw)
+    beta = scfg_outside(cg, tw, alpha)
+
+    terminal_rules, unary_rules, emit_unary_rules, binary_rules, emit_paired, \
+        epsilon_rules = _classify_rules(cg, tw)
+
+    # Accumulate posterior mass per (column, nonterminal)
+    post = jnp.full((C, K), NEG_INF)
+
+    # Terminal emission rules: A → e at column i
+    for lhs, log_w, model_idx, n_pos in terminal_rules:
+        if n_pos == 1:
+            for i in range(C):
+                emit_w = tw.single[model_idx, i]
+                score = beta[lhs, i, i + 1] + log_w + emit_w - log_Z
+                post = post.at[i, lhs].set(
+                    jnp.logaddexp(post[i, lhs], score))
+
+    # Left-emitting unary rules: A → e B, emits at column i
+    for lhs, rhs, log_w, model_idx in emit_unary_rules:
+        for span_len in range(1, C + 1):
+            for i in range(C - span_len + 1):
+                j = i + span_len
+                emit_w = tw.single[model_idx, i]
+                score = beta[lhs, i, j] + log_w + emit_w + alpha[rhs, i + 1, j] - log_Z
+                post = post.at[i, lhs].set(
+                    jnp.logaddexp(post[i, lhs], score))
+
+    # Paired emission rules: A → e₁ B e₂, emits at columns i and j-1
+    for lhs, rhs, log_w, model_idx in emit_paired:
+        if tw.paired is not None:
+            for span_len in range(2, C + 1):
+                for i in range(C - span_len + 1):
+                    j = i + span_len
+                    emit_w = tw.paired[model_idx, i, j - 1]
+                    score = beta[lhs, i, j] + log_w + emit_w + alpha[rhs, i + 1, j - 1] - log_Z
+                    # Left position
+                    post = post.at[i, lhs].set(
+                        jnp.logaddexp(post[i, lhs], score))
+                    # Right position
+                    post = post.at[j - 1, lhs].set(
+                        jnp.logaddexp(post[j - 1, lhs], score))
+
+    # Convert from log-space
+    posteriors = jnp.exp(post)
+
+    return posteriors, log_Z
+
+
 def scfg_viterbi(cg, tw):
     """CYK/Viterbi decoding for SCFG.
 

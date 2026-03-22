@@ -9,7 +9,7 @@ from jaxrate import (
     GrammarBuilder, EmissionGroup, compile_grammar,
     TerminalWeights, inside, viterbi,
 )
-from jaxrate.scfg import scfg_inside, scfg_outside, scfg_viterbi
+from jaxrate.scfg import scfg_inside, scfg_outside, scfg_viterbi, scfg_posteriors
 
 
 def _simple_scfg():
@@ -99,3 +99,32 @@ class TestSCFGViterbi:
         grammar = _simple_scfg()
         labels, log_prob = viterbi(grammar, paired_terminal_weights)
         assert labels.shape == (paired_terminal_weights.C,)
+
+
+class TestSCFGPosteriors:
+    def test_posteriors_shape(self, paired_terminal_weights):
+        grammar = _simple_scfg()
+        cg = compile_grammar(grammar)
+        posteriors, log_ll = scfg_posteriors(cg, paired_terminal_weights)
+
+        C = paired_terminal_weights.C
+        K = cg.n_nonterminals
+        assert posteriors.shape == (C, K)
+        assert jnp.isfinite(log_ll)
+
+    def test_posteriors_finite(self, paired_terminal_weights):
+        grammar = _simple_scfg()
+        cg = compile_grammar(grammar)
+        posteriors, _ = scfg_posteriors(cg, paired_terminal_weights)
+
+        # All posteriors should be finite and non-NaN
+        assert jnp.all(jnp.isfinite(posteriors))
+        # At least some columns should have non-zero posteriors
+        assert posteriors.sum() > 0
+
+    def test_posteriors_nonnegative(self, paired_terminal_weights):
+        grammar = _simple_scfg()
+        cg = compile_grammar(grammar)
+        posteriors, _ = scfg_posteriors(cg, paired_terminal_weights)
+
+        assert jnp.all(posteriors >= -1e-10)

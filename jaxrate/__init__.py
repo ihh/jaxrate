@@ -36,9 +36,19 @@ from .presets import (
     pfold_grammar,
     gene_finder_grammar,
     pseudoknot_grammar,
+    xdecoder_grammar,
 )
 
-from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar
+from .scfg import scfg_posteriors
+
+from .wiggle import (
+    write_wiggle,
+    write_bedgraph,
+    write_multi_wiggle,
+    posteriors_to_structure_track,
+)
+
+from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar, expand_macros
 
 from .nj import (
     neighbor_joining,

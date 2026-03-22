@@ -1,0 +1,27 @@
+{
+  "name": "jaxrate-web",
+  "version": "0.1.0",
+  "description": "jaxrate web port: stochastic MCFGs with phylogenetic terminal weights",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "src/webgpu/shaders/*.wgsl"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.44",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

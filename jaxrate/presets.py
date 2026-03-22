@@ -222,3 +222,30 @@ def pseudoknot_grammar(max_span=None):
     gb.add_rule(PK, rhs=[S, S], log_weight=jnp.log(0.2))
 
     return gb.build(start=S, n_models=2)
+
+
+def xdecoder_grammar():
+    """XDecoder RNA structure-in-coding-region grammar (SCFG).
+
+    Parses the bundled XDecoder.eg grammar file, which implements the
+    RNA-Decoder model (Pedersen et al. 2004) for detecting conserved RNA
+    secondary structure overlapping protein-coding regions.
+
+    The grammar has:
+        - 4 rate classes x 3 codon positions = 12 non-structural chains
+        - 3 loop chains (one per codon position)
+        - 9 paired chains (3x3 codon position pairs for base-pair co-evolution)
+        - 86 nonterminals, 149 rules
+
+    Reference:
+        Westesson & Holmes (2012) "Developing and Applying Heterogeneous
+        Phylogenetic Models with XRate" PLOS ONE 7(6):e36898
+
+    Returns:
+        XrateGrammar with grammar, chains, alphabet, and model mappings
+    """
+    import os
+    from .xrate_parser import parse_xrate_file
+
+    data_dir = os.path.join(os.path.dirname(__file__), 'data')
+    return parse_xrate_file(os.path.join(data_dir, 'XDecoder.eg'))
