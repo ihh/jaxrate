@@ -63,6 +63,7 @@ export type { NJResult } from './nj.js';
 export {
   getDevice, releaseDevice,
   hmmForwardGpu, hmmBackwardGpu, hmmViterbiGpu, hmmPosteriorsGpu,
+  scfgInsideGpu, scfgViterbiGpu,
 } from './webgpu/index.js';
 
 // ── High-level dispatchers ──────────────────────────────────────────
