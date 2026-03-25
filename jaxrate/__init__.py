@@ -48,6 +48,24 @@ from .wiggle import (
     posteriors_to_structure_track,
 )
 
+from .jbrowse import (
+    labels_to_features,
+    labels_to_annotation_map,
+    merge_features,
+    write_bed,
+    write_gff3,
+    posteriors_to_bedgraph,
+    conservation_bedgraph,
+    write_jbrowse_tracks,
+)
+
+from .msa_to_jbrowse import (
+    load_msa,
+    build_tree,
+    get_grammar_for_analysis,
+    msa_to_jbrowse,
+)
+
 from .xrate_parser import parse_xrate, parse_xrate_file, XrateGrammar, expand_macros
 
 from .nj import (

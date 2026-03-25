@@ -32,6 +32,8 @@ jaxrate/
   nj.py                   # Neighbor-Joining tree construction + distance matrices
   presets.py              # Pre-built grammars (pfold, gene_finder, pseudoknot)
   _log_semiring.py        # logsumexp utilities (NEG_INF = -1e38)
+  jbrowse.py              # JBrowse track output: BED, BED12, GFF3, BedGraph
+  msa_to_jbrowse.py       # High-level pipeline: MSA → grammar → JBrowse tracks
   data/
     RF00390.sto           # Rfam pseudoknot alignment (TYMV_upPK, 23 nt, 7 seqs)
     pfold.eg              # xrate pfold grammar (RNA SCFG with single + paired chains)
@@ -47,12 +49,15 @@ tests/
   test_xrate_parser.py    # xrate .eg parser: S-expr, nullrna, pfold, subby conversion
   test_nj.py              # Neighbor-Joining: tree construction, distances, RF00390
   test_cross_algorithm.py # HMM forward == SCFG inside for right-linear grammars
+  test_jbrowse.py         # JBrowse track output: BED, GFF3, features, merge
+  test_msa_to_jbrowse.py  # MSA-to-JBrowse pipeline: load, tree, grammar, end-to-end
 
 examples/
   gene_finding.py         # HMM gene finder with synthetic weights
   rna_structure_prediction.py  # SCFG RNA structure with synthetic weights
   rna_structure_phylogenetic.py # Real phylo: pfold.eg + NJ tree + subby → Viterbi
   pseudoknot_prediction.py     # MCFG pseudoknot with RF00390 data
+  msa_to_jbrowse.py            # CLI: MSA → JBrowse tracks (BED/GFF3/BedGraph)
 ```
 
 ## Public API
@@ -104,6 +109,22 @@ jukes_cantor_distances(alignment, A=4)              # → (N, N) JC-corrected di
 pfold_grammar()                   # RNA structure (SCFG)
 gene_finder_grammar()             # Gene finding (HMM)
 pseudoknot_grammar(max_span=None) # Pseudoknots (MCFG)
+
+# JBrowse track output
+labels_to_features(labels, grammar, chrom, start, strand)  # → list of feature dicts
+labels_to_annotation_map(labels, grammar)                   # → list of annotation strings
+merge_features(features, grammar, categories)               # → hierarchical features
+write_bed(filepath, features, format='bed6')                # BED3/BED6/BED12 output
+write_gff3(filepath, features, source='jaxrate')            # GFF3 output
+posteriors_to_bedgraph(filepath, posteriors, grammar, ...)   # posterior BedGraph
+conservation_bedgraph(filepath, terminal_weights, ...)       # conservation BedGraph
+write_jbrowse_tracks(output_dir, labels, grammar, tw, ...)  # all tracks at once
+
+# MSA-to-JBrowse pipeline
+load_msa(filepath, format, alphabet, reference)             # → alignment dict
+build_tree(alignment, leaf_names, method='nj')              # → (tree, nj_result, full_aln)
+get_grammar_for_analysis(analysis_type, grammar_file)       # → (grammar, xrate_grammar)
+msa_to_jbrowse(msa_path, output_dir, analysis_types, ...)  # full pipeline
 ```
 
 ## Conventions
