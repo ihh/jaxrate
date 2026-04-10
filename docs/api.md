@@ -222,7 +222,7 @@ def train(grammar, terminal_weights, n_iterations=100, convergence_tol=1e-6)
     -> (trained_grammar, TrainState, history)
 ```
 
-Run EM training. Returns the optimized grammar, final `TrainState`, and a list of `(iteration, log_likelihood)` history.
+Run EM training on grammar rule weights only (terminal weights are fixed). Returns the optimized grammar, final `TrainState`, and a list of `(iteration, log_likelihood)` history.
 
 ### `em_step`
 
@@ -231,6 +231,69 @@ def em_step(grammar, terminal_weights) -> (new_grammar, log_likelihood)
 ```
 
 Single EM iteration: E-step (inside-outside for expected counts) then M-step (normalize per LHS nonterminal).
+
+## Integrated phylogenetic training
+
+### `PhyloModel`
+
+```python
+class PhyloModel:
+    def __init__(self, grammar, alignment, tree, chains,
+                 paired_chains=None, maxChunkSize=128)
+
+    @classmethod
+    def from_xrate(cls, xrate_grammar, alignment, tree, maxChunkSize=128)
+
+    def terminal_weights(self, recompute=False) -> TerminalWeights
+    def update_chains(self, new_chains=None, new_paired_chains=None)
+    def update_grammar(self, new_grammar)
+```
+
+Wraps a grammar + alignment + tree + substitution models into a single object. Handles subby interaction internally — callers never need to import or configure subby.
+
+**Constructor args:**
+- `grammar`: Grammar with emission rules referencing model indices
+- `alignment`: `(R, C)` int32 alignment (one row per tree node, including internal nodes with gap tokens)
+- `tree`: subby Tree, or dict with `parentIndex` and `distanceToParent`
+- `chains`: list of chain dicts, each with `rate_matrix` `(A, A)`, `pi` `(A,)`, and optionally `update_policy` (`'rev'` or `'irrev'`)
+- `paired_chains`: optional list for paired-column models, each with `rate_matrix` `(A^2, A^2)`, `pi` `(A^2,)`, and `alphabet_size`
+
+**`from_xrate` class method:** Construct from a parsed `XrateGrammar`.
+
+**`terminal_weights()`**: Compute terminal weights from current rate matrices via subby. Cached until rate matrices change.
+
+### `phylo_train`
+
+```python
+def phylo_train(phylo_model, n_iterations=100, convergence_tol=1e-6,
+                fit_rules=True, fit_rates=True, fit_pi=True,
+                pseudocounts=0.0) -> history
+```
+
+Integrated EM training loop. Jointly fits grammar rule weights and substitution model parameters (rate matrices Q and equilibrium distributions π).
+
+**Args:**
+- `phylo_model`: PhyloModel (modified in-place)
+- `fit_rules`: update grammar rule log-weights
+- `fit_rates`: update substitution rate matrices
+- `fit_pi`: update equilibrium distributions
+- `pseudocounts`: wait-time pseudocount (xrate default: `1e-4`). Prevents rate divergence on sparse data.
+
+**Returns:** list of `(iteration, log_likelihood)` tuples.
+
+### `phylo_em_step`
+
+```python
+def phylo_em_step(phylo_model, fit_rules=True, fit_rates=True, fit_pi=True,
+                  pseudocounts=0.0) -> log_likelihood
+```
+
+Single integrated EM step. E-step computes expected rule counts and per-model column posteriors via inside-outside. M-step updates rule weights and/or rate matrices.
+
+**Rate matrix M-step** (following xrate):
+- Q_ij = u_ij / w_i (expected transition counts / expected dwell time)
+- For reversible models, π is the stationary distribution of the new Q
+- For irreversible models, π is from empirical root state posteriors
 
 ## Terminal weights
 

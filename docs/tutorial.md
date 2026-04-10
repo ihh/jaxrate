@@ -138,3 +138,102 @@ alpha1, alpha2, log_likelihood = mcfg_inside(cg, tw)
 ```
 
 The `max_span` limits how far apart the paired positions in a pseudoknot stem can be. For example, `max_span=15` means each component of the PK nonterminal can span at most 15 columns. Setting `max_span` equal to or larger than the sequence length gives the same result as unlimited.
+
+## Step 7: Integrated phylogenetic training with PhyloModel
+
+`PhyloModel` wraps an alignment, tree, grammar, and substitution models into a single object. It handles subby interaction internally so you never need to import or configure it yourself.
+
+### Building a PhyloModel
+
+```python
+import math
+import numpy as np
+from jaxrate import GrammarBuilder, EmissionGroup, PhyloModel
+
+# Build a 2-state phylo-HMM
+gb = GrammarBuilder()
+SLOW = gb.add_nonterminal('slow')
+FAST = gb.add_nonterminal('fast')
+gb.add_rule(SLOW, rhs=[SLOW], emissions=[EmissionGroup(1, 0)], log_weight=math.log(0.9))
+gb.add_rule(SLOW, rhs=[FAST], emissions=[EmissionGroup(1, 0)], log_weight=math.log(0.09))
+gb.add_rule(SLOW, rhs=[],     emissions=[EmissionGroup(1, 0)], log_weight=math.log(0.01))
+gb.add_rule(FAST, rhs=[FAST], emissions=[EmissionGroup(1, 1)], log_weight=math.log(0.9))
+gb.add_rule(FAST, rhs=[SLOW], emissions=[EmissionGroup(1, 1)], log_weight=math.log(0.09))
+gb.add_rule(FAST, rhs=[],     emissions=[EmissionGroup(1, 1)], log_weight=math.log(0.01))
+grammar = gb.build(start=SLOW, n_models=2)
+
+# Define per-state rate matrices (DNA, A=4)
+chains = [
+    {'rate_matrix': np.eye(4) * -0.5 + np.full((4,4), 0.5/3) - np.diag(np.full(4, 0.5/3)),
+     'pi': np.full(4, 0.25)},  # slow
+    {'rate_matrix': np.eye(4) * -3.0 + np.full((4,4), 3.0/3) - np.diag(np.full(4, 3.0/3)),
+     'pi': np.full(4, 0.25)},  # fast
+]
+
+pm = PhyloModel(grammar, alignment, tree, chains)
+```
+
+### Or from an xrate grammar file
+
+```python
+from jaxrate import parse_xrate_file, PhyloModel
+
+xg = parse_xrate_file('pfold.eg')
+pm = PhyloModel.from_xrate(xg, alignment, tree)
+```
+
+### Computing terminal weights and running algorithms
+
+```python
+from jaxrate import viterbi, inside
+
+# PhyloModel computes terminal weights internally (calls subby under the hood)
+tw = pm.terminal_weights()
+
+# Use them with any jaxrate algorithm
+labels, log_prob = viterbi(pm.grammar, tw)
+chart, ll = inside(pm.grammar, tw)
+```
+
+### Integrated EM training
+
+`phylo_train` jointly fits grammar rule weights and substitution model parameters:
+
+```python
+from jaxrate import phylo_train
+
+# Fit everything (rules + rate matrices + equilibrium distributions)
+history = phylo_train(pm, n_iterations=50, pseudocounts=1e-4)
+print(f"Final LL: {history[-1][1]:.2f}")
+
+# Check fitted rate matrices
+for i, chain in enumerate(pm.chains):
+    rate = -chain['rate_matrix'].diagonal().mean()
+    print(f"  Model {i}: mean rate = {rate:.4f}")
+```
+
+### Controlling what gets optimized
+
+Use `fit_rules`, `fit_rates`, and `fit_pi` flags:
+
+```python
+# Fix rate matrices, only train grammar weights
+history = phylo_train(pm, n_iterations=50,
+                      fit_rules=True, fit_rates=False, fit_pi=False)
+
+# Fix grammar, only train rate matrices + pi
+history = phylo_train(pm, n_iterations=50,
+                      fit_rules=False, fit_rates=True, fit_pi=True,
+                      pseudocounts=1e-4)
+```
+
+### Pseudocounts
+
+The `pseudocounts` parameter adds regularization to prevent rate matrix degeneration on sparse data (following xrate convention). It adds pseudo-wait-time to the expected dwell times in the M-step. xrate's default is `1e-4`. For well-conditioned data (many sequences, long branches), `pseudocounts=0` works fine.
+
+### Rate matrix M-step details
+
+The rate matrix update follows xrate's approach:
+- **Off-diagonal rates**: Q_ij = (expected i→j transitions) / (expected dwell time in state i)
+- **Equilibrium distribution**: for reversible models, π is the stationary distribution of the new Q (solving π·Q = 0). This ensures detailed balance.
+- **Expected counts** come from subby's phylogenetic inside-outside on the tree, weighted by grammar state posteriors from the HMM/SCFG forward-backward.

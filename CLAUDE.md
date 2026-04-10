@@ -209,14 +209,33 @@ pytest -v
 - Use a real coding/non-coding substitution model
 - Apply to a multi-species alignment of a known gene region
 
-### 4. Additional xrate grammar imports
+### 4. ~~Integrated rate matrix fitting~~ ✅ DONE
+
+**Goal**: Joint EM training of grammar rule weights and substitution model rate matrices, matching xrate's full training loop. Users should not need to call subby directly — jaxrate wraps it.
+
+**Key design decisions**:
+- **`PhyloModel`** class wraps alignment + tree + substitution models (rate matrices Q and initial distributions π). Provides a `.terminal_weights()` method that calls subby internally, so callers never import or configure subby themselves.
+- **`phylo_train()`** runs the integrated EM loop: E-step (inside-outside → expected rule usage counts + per-model column posteriors), M-step (re-estimate rule weights + rate matrices + π from expected counts), recompute terminal weights, repeat.
+- **Fit control**: `fit_rules=True`, `fit_rates=True`, `fit_pi=True` flags let callers disable parts of the M-step (e.g., fix rate matrices and only train rule weights, or vice versa).
+- **Rate matrix M-step**: Uses expected column counts (posterior probability of each model at each column) as weights for a weighted expected-substitution-count update. For reversible models, the symmetrized rate matrix is recovered via `Q_ij = n_ij / (pi_j * T)` where `n_ij` are the weighted expected substitution counts and `T` is the total expected time.
+
+**Modules**:
+- `jaxrate/phylo_model.py` — `PhyloModel` class, `phylo_train()`, `phylo_em_step()`
+- Updated `jaxrate/train.py` — proper expected count computation for HMM rules
+- Updated `jaxrate/__init__.py` — exports `PhyloModel`, `phylo_train`
+
+**Tests**: `tests/test_phylo_model.py` — PhyloModel construction, terminal weight computation, integrated training convergence, fit flag control.
+
+**Tutorial**: `docs/tutorial.md` — new section on building, fitting, and using a phylo-HMM for protein MSAs with per-state rate matrices.
+
+### 5. Additional xrate grammar imports
 
 After the parser works on pfold.eg, progressively import more complex grammars:
 - `codon-models/` — codon substitution models (requires k-mer terminal weights)
 - `hky.eg`, `jc.eg` — standard nucleotide models
 - Protein models if applicable
 
-### 5. MCFG outside algorithm
+### 6. MCFG outside algorithm
 
 Currently raises `NotImplementedError` in `outside.py`. Needed for:
 - Full EM training of MCFG grammars

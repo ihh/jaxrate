@@ -30,6 +30,8 @@ from .terminal_weights import precompute_terminal_weights
 
 from .train import train, em_step
 
+from .phylo_model import PhyloModel, phylo_train, phylo_em_step
+
 from .simulate import simulate_parse
 
 from .presets import (
