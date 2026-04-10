@@ -1,0 +1,7 @@
+# STOCKHOLM 1.0
+#=GF NH ((seq1:0.05,seq2:0.05):0.1,(seq3:0.1,seq4:0.15):0.05);
+seq1  MKLIVDT
+seq2  MKLIVDT
+seq3  MKLIIEA
+seq4  MRLVVET
+//

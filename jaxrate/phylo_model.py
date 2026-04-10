@@ -510,6 +510,16 @@ def _m_step_rates(phylo_model, model_posteriors, fit_rates=True, fit_pi=True,
                                       axis=-1)  # (A, A)
             wc = np.asarray(weighted_counts)
 
+            # For reversible models, symmetrize off-diagonal counts
+            # to match xrate's eigenbasis symmetrization.
+            # This ensures u_ij = u_ji, consistent with detailed balance.
+            if rev:
+                off_diag = wc.copy()
+                np.fill_diagonal(off_diag, 0)
+                off_diag_sym = (off_diag + off_diag.T) / 2
+                np.fill_diagonal(off_diag_sym, np.diag(wc))
+                wc = off_diag_sym
+
             # xrate-style pseudocounts: add to wait times (diagonal)
             w = np.diag(wc).copy() + pseudocounts  # dwell times
             u = wc.copy()
