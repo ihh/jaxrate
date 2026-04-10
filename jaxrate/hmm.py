@@ -14,28 +14,35 @@ from ._log_semiring import NEG_INF, logsumexp
 def _build_hmm_tables(cg, tw):
     """Extract HMM transition matrix and emission weights from compiled grammar.
 
-    For an HMM (right-linear grammar), each rule is either:
-    - Terminal: LHS → emit (no RHS nonterminal)
-    - Transition: LHS → emit RHS
+    Handles both flat right-linear rules (LHS → emit RHS) and the xrate
+    two-step convention (S → emit S*, S* → RHS) by eliminating null
+    (non-emitting) states.
+
+    Returns tables indexed by the FULL nonterminal set (K = n_nonterminals).
+    Null states get NEG_INF emission weights so they contribute nothing
+    to the forward/backward computation.
 
     We build:
     - log_trans: (K, K) log transition matrix (trans[i,j] = log P(i → j))
     - log_emit: (K, C) log emission weights per state per column
     - log_init: (K,) initial state log-probabilities
     - log_term: (K,) log-probability of terminating at each state
-
-    For multi-column emissions (e.g., codons emitting 3 columns), the emission
-    at column c uses the k-mer terminal weight covering that position.
     """
+    import numpy as np
+
     K = cg.n_nonterminals
     C = tw.C
 
-    log_trans = jnp.full((K, K), NEG_INF)
-    log_term = jnp.full((K,), NEG_INF)
-    log_emit_model = jnp.full((K,), -1, dtype=jnp.int32)  # which model each state uses
-    emit_n_pos = jnp.ones((K,), dtype=jnp.int32)  # columns consumed per emission
+    # ------------------------------------------------------------------
+    # Step 1: Classify rules and build raw transition/emit/term tables
+    # ------------------------------------------------------------------
+    # Raw tables over ALL nonterminals (including null states)
+    raw_log_trans = np.full((K, K), NEG_INF)
+    raw_log_term = np.full(K, NEG_INF)
+    emit_model_for = np.full(K, -1, dtype=np.int32)
+    emit_npos_for = np.ones(K, dtype=np.int32)
+    has_emit = np.zeros(K, dtype=bool)
 
-    # Process rules to build transition matrix
     for r in range(cg.n_rules):
         lhs = int(cg.rule_lhs[r])
         n_rhs = int(cg.rule_n_rhs[r])
@@ -43,42 +50,104 @@ def _build_hmm_tables(cg, tw):
         n_emit = int(cg.rule_n_emissions[r])
 
         if n_emit > 0:
-            emit_model = int(cg.rule_emission_model[r, 0])
-            emit_npos = int(cg.rule_emission_npos[r, 0])
-            log_emit_model = log_emit_model.at[lhs].set(emit_model)
-            emit_n_pos = emit_n_pos.at[lhs].set(emit_npos)
+            emit_model_for[lhs] = int(cg.rule_emission_model[r, 0])
+            emit_npos_for[lhs] = int(cg.rule_emission_npos[r, 0])
+            has_emit[lhs] = True
 
         if n_rhs == 0:
-            # Terminal rule: LHS → emit
-            log_term = log_term.at[lhs].set(
-                jnp.logaddexp(log_term[lhs], log_w))
+            raw_log_term[lhs] = float(
+                jnp.logaddexp(raw_log_term[lhs], log_w))
         else:
-            # Transition rule: LHS → emit RHS[0]
-            rhs = int(cg.rule_rhs[r, 0])
-            log_trans = log_trans.at[lhs, rhs].set(
-                jnp.logaddexp(log_trans[lhs, rhs], log_w))
+            rhs0 = int(cg.rule_rhs[r, 0])
+            raw_log_trans[lhs, rhs0] = float(
+                jnp.logaddexp(raw_log_trans[lhs, rhs0], log_w))
 
-    # Build emission table: (K, C)
-    # For single-column states, emit[k, c] = tw.single[model_k, c]
-    # For k-mer states, emit[k, c] uses tw.kmer if available
-    log_emit = jnp.zeros((K, C))
+    # ------------------------------------------------------------------
+    # Step 2: Eliminate null (non-emitting) states
+    # ------------------------------------------------------------------
+    # A null state is one that never emits in any of its rules.
+    # For the xrate pattern (S → emit S*, S* → {transitions}), S* is null.
+    # We compose transitions through null chains: if path is
+    #   emitting_i → null_a → null_b → emitting_j
+    # the effective transition prob is product of the link probs.
+    #
+    # In log space: iterate log_trans through null states until convergence.
+
+    is_null = ~has_emit
+
+    if np.any(is_null):
+        # Propagate transitions through null states using log-space
+        # matrix "multiplication" (logsumexp over intermediate null states).
+        # Iterate until no null→null transitions remain.
+        lt = raw_log_trans.copy()
+        lterm = raw_log_term.copy()
+        null_idx = np.where(is_null)[0]
+
+        for _iteration in range(K + 1):
+            changed = False
+            for n in null_idx:
+                # For every state i that transitions to null state n:
+                for i in range(K):
+                    if lt[i, n] <= NEG_INF + 1:
+                        continue
+                    log_p_i_n = lt[i, n]
+                    # Compose: i → n → j  becomes i → j
+                    for j in range(K):
+                        if lt[n, j] <= NEG_INF + 1:
+                            continue
+                        new_val = log_p_i_n + lt[n, j]
+                        old_val = lt[i, j]
+                        combined = float(jnp.logaddexp(old_val, new_val))
+                        if combined > old_val + 1e-12:
+                            lt[i, j] = combined
+                            changed = True
+                    # Compose termination: i → n → end
+                    if lterm[n] > NEG_INF + 1:
+                        new_term = log_p_i_n + lterm[n]
+                        old_term = lterm[i]
+                        combined = float(jnp.logaddexp(old_term, new_term))
+                        if combined > old_term + 1e-12:
+                            lterm[i] = combined
+                            changed = True
+                    # Remove the i → n transition (it's been composed)
+                    lt[i, n] = NEG_INF
+            if not changed:
+                break
+
+        raw_log_trans = lt
+        raw_log_term = lterm
+
+    # ------------------------------------------------------------------
+    # Step 3: Build JAX arrays
+    # ------------------------------------------------------------------
+    log_trans = jnp.array(raw_log_trans)
+    log_term = jnp.array(raw_log_term)
+
+    # Emission table: (K, C)
+    log_emit = jnp.full((K, C), NEG_INF)
     for k in range(K):
-        model_idx = int(log_emit_model[k])
+        model_idx = int(emit_model_for[k])
         if model_idx >= 0:
-            npos = int(emit_n_pos[k])
+            npos = int(emit_npos_for[k])
             if npos == 1:
                 log_emit = log_emit.at[k].set(tw.single[model_idx])
             elif tw.kmer is not None:
-                # Multi-column emission: use k-mer terminal weights
                 log_emit = log_emit.at[k].set(
                     jnp.pad(tw.kmer[model_idx],
                             (0, max(0, C - tw.kmer[model_idx].shape[0])),
                             constant_values=NEG_INF)[:C])
+        # Null states keep NEG_INF emissions — they don't participate
 
-    # Initial state distribution: start nonterminal entered with probability 1.
-    # The HMM begins in the start state, emits, then transitions.
+    # Initial distribution: propagate through null start state
     log_init = jnp.full((K,), NEG_INF)
-    log_init = log_init.at[cg.start].set(0.0)
+    if is_null[cg.start]:
+        # Start is null — distribute to its successors
+        for j in range(K):
+            if raw_log_trans[cg.start, j] > NEG_INF + 1:
+                log_init = log_init.at[j].set(
+                    jnp.logaddexp(log_init[j], raw_log_trans[cg.start, j]))
+    else:
+        log_init = log_init.at[cg.start].set(0.0)
 
     return log_trans, log_emit, log_init, log_term
 

@@ -209,6 +209,11 @@ def _normalize_chain(chain):
 def _compute_hmm_rule_posteriors(grammar, cg, tw):
     """Compute expected usage count for each rule at each column (HMM).
 
+    Handles grammars with null (non-emitting) states such as xrate's
+    S → emit S*, S* → {transitions} pattern.  The forward-backward runs
+    on the effective (null-eliminated) HMM; transition counts are then
+    decomposed back to the original grammar rules.
+
     Returns:
         rule_counts: (n_rules,) expected total counts per rule
         model_posteriors: (n_models, C) posterior probability of each model
@@ -228,10 +233,12 @@ def _compute_hmm_rule_posteriors(grammar, cg, tw):
     rule_counts = np.zeros(n_rules, dtype=np.float64)
     model_posteriors = np.zeros((cg.n_models, C), dtype=np.float64)
 
-    # Build rule-to-state mappings
+    # Identify emitting vs null states
+    has_emit = np.zeros(K, dtype=bool)
     emit_model_for_state = {}
-    for r_idx, rule in enumerate(grammar.rules):
+    for rule in grammar.rules:
         if rule.emissions:
+            has_emit[rule.lhs] = True
             emit_model_for_state[rule.lhs] = rule.emissions[0].model_index
 
     # State posteriors: P(state_c = k | x) = exp(alpha[c,k] + beta[c,k] - ll)
@@ -244,38 +251,114 @@ def _compute_hmm_rule_posteriors(grammar, cg, tw):
             m_idx = emit_model_for_state[k]
             model_posteriors[m_idx] += np.asarray(gamma[:, k])
 
-    # Terminal rule counts
-    for r_idx, rule in enumerate(grammar.rules):
-        lhs = rule.lhs
-        if len(rule.rhs) == 0:
-            log_count = alpha[-1, lhs] + log_term[lhs] - ll
-            rule_counts[r_idx] = float(jnp.exp(log_count))
-
-    # Pairwise transition counts: E[N(i→j)] summed over all columns
-    trans_counts = np.zeros((K, K), dtype=np.float64)
+    # Effective transition counts between emitting states (from forward-backward)
+    eff_trans_counts = np.zeros((K, K), dtype=np.float64)
     for c in range(C - 1):
         log_joint = (alpha[c, :, None] + log_trans +
                      log_emit[None, :, c + 1] + beta[c + 1, None, :] - ll)
-        trans_counts += np.asarray(jnp.exp(log_joint))
+        eff_trans_counts += np.asarray(jnp.exp(log_joint))
 
-    # Map transition counts to rule counts
+    # Effective termination counts
+    eff_term_counts = np.zeros(K, dtype=np.float64)
+    for k in range(K):
+        if log_term[k] > NEG_INF + 1:
+            eff_term_counts[k] = float(jnp.exp(alpha[-1, k] + log_term[k] - ll))
+
+    # ---------------------------------------------------------------
+    # Map effective counts back to original grammar rules.
+    #
+    # The key insight: null elimination composes chains like
+    #   emitting_i → null_a → emitting_j
+    # into effective transitions emitting_i → emitting_j.  The original
+    # rules are:
+    #   emitting_i → null_a (emit rule, prob 1)
+    #   null_a → emitting_j (transition rule)
+    #
+    # The effective count for (emitting_i → emitting_j) equals the
+    # count for the null_a → emitting_j rule (since the emit rule is
+    # deterministic with prob 1).
+    #
+    # Build mapping: for each emitting state, find its null successor(s)
+    # via the original (pre-elimination) rules.
+    # ---------------------------------------------------------------
+
+    # Build original raw transitions (before null elimination)
     from collections import defaultdict
-    rules_by_pair = defaultdict(list)
-    for r_idx, rule in enumerate(grammar.rules):
-        if len(rule.rhs) == 1:
-            rules_by_pair[(rule.lhs, rule.rhs[0])].append(r_idx)
+    emit_to_null = defaultdict(list)  # emitting_state → [(null_state, rule_idx)]
+    null_rules = defaultdict(list)     # null_state → [(target, rule_idx)]
+    direct_rules = defaultdict(list)   # emitting → [(target, rule_idx)]
 
-    for (lhs, rhs), r_indices in rules_by_pair.items():
-        total_count = trans_counts[lhs, rhs]
-        if len(r_indices) == 1:
-            rule_counts[r_indices[0]] = total_count
-        else:
-            # Multiple rules with same (lhs, rhs) — apportion by weight
-            log_ws = np.array([grammar.rules[i].log_weight for i in r_indices])
-            ws = np.exp(log_ws - np.max(log_ws))
-            ws /= ws.sum()
-            for i, r_idx in enumerate(r_indices):
-                rule_counts[r_idx] = total_count * ws[i]
+    for r_idx, rule in enumerate(grammar.rules):
+        lhs = rule.lhs
+        if len(rule.rhs) == 1:
+            rhs0 = rule.rhs[0]
+            if has_emit[lhs] and not has_emit[rhs0]:
+                # Emitting state → null state (emit rule, e.g. S → emit S*)
+                emit_to_null[lhs].append((rhs0, r_idx))
+            elif not has_emit[lhs]:
+                # Null state → something (transition rule from S*)
+                null_rules[lhs].append((rhs0, r_idx))
+            else:
+                # Emitting → emitting (flat right-linear)
+                direct_rules[lhs].append((rhs0, r_idx))
+        elif len(rule.rhs) == 0:
+            if not has_emit[lhs]:
+                # Null state termination (S* → ())
+                null_rules[lhs].append((-1, r_idx))  # -1 = termination
+            else:
+                # Emitting state termination
+                direct_rules[lhs].append((-1, r_idx))
+
+    # For grammars WITH null states: decompose effective counts
+    if any(not has_emit[k] for k in range(K)):
+        for emit_state in range(K):
+            if not has_emit[emit_state]:
+                continue
+            # Find what null states this emitting state reaches
+            for null_state, emit_rule_idx in emit_to_null[emit_state]:
+                # The emit rule (emit_state → null_state) fires every time
+                # emit_state emits. Its count = sum of gamma for emit_state.
+                emit_rule_count = float(jnp.sum(gamma[:, emit_state]))
+                rule_counts[emit_rule_idx] = emit_rule_count
+
+                # Now apportion the effective counts among null_state's rules.
+                # Each null_state rule (null→target) gets the effective count
+                # for (emit_state→target).
+                for target, null_rule_idx in null_rules[null_state]:
+                    if target == -1:
+                        # Termination: use effective termination count
+                        rule_counts[null_rule_idx] = eff_term_counts[emit_state]
+                    else:
+                        # Transition: use effective transition count
+                        rule_counts[null_rule_idx] += eff_trans_counts[
+                            emit_state, target]
+
+    # For flat right-linear rules (no null intermediary)
+    for emit_state in range(K):
+        if not has_emit[emit_state]:
+            continue
+        for target, rule_idx in direct_rules[emit_state]:
+            if target == -1:
+                rule_counts[rule_idx] = eff_term_counts[emit_state]
+            else:
+                rule_counts[rule_idx] += eff_trans_counts[emit_state, target]
+
+    # Handle rules from the start nonterminal (null start state)
+    start = cg.start
+    if not has_emit[start]:
+        # Start is null — its rules get counts from the initial distribution
+        for r_idx, rule in enumerate(grammar.rules):
+            if rule.lhs == start and len(rule.rhs) == 1:
+                target = rule.rhs[0]
+                # Count = P(first emitting state = target | data)
+                if has_emit[target]:
+                    # gamma[0, target] = P(state_0 = target | data)
+                    rule_counts[r_idx] = float(gamma[0, target])
+                else:
+                    # target is also null — propagate through
+                    for t2, _ in null_rules[target]:
+                        if t2 >= 0 and has_emit[t2]:
+                            rule_counts[r_idx] += float(gamma[0, t2])
 
     return rule_counts, model_posteriors, ll
 

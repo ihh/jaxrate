@@ -39,7 +39,6 @@ from jaxrate.phylo_model import (
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'jaxrate', 'data')
-DART_GRAMMARS = '/home/user/dart/grammars'
 
 # Tolerance for floating-point comparisons between JAX eigensolver and
 # xrate's Newmat Jacobi eigensolver
@@ -384,7 +383,7 @@ class TestXrateNullProt:
             os.path.join(DATA_DIR, 'prot_test.sto'),
             alphabet=self.PROT_ALPHABET,
         )
-        xg = parse_xrate_file(os.path.join(DART_GRAMMARS, 'nullprot.eg'))
+        xg = parse_xrate_file(os.path.join(DATA_DIR, 'nullprot.eg'))
         chain = xg.get_single_models()[0]
         Q = np.array(chain['rate_matrix'])
         pi = np.array(chain['pi'])
@@ -475,6 +474,119 @@ class TestXratePfold:
         # Just verify they're finite and positive.
         assert np.all(np.isfinite(result['waits']))
         assert np.all(result['waits'] > 0)
+
+
+# ---------------------------------------------------------------------------
+# Test Case 5: Two-state phylo-HMM (slow/fast, multi-chain, xrate S/S* pattern)
+# This is the critical test for HMM forward-backward with state-specific
+# emission models. Unlike the null models above, this exercises:
+#   - Per-state model posteriors (forward-backward assigns columns to chains)
+#   - Null-state elimination (xrate's S→emit S*, S*→transition pattern)
+#   - Multi-chain rate M-step (each chain weighted by its state's posteriors)
+#   - Rule weight M-step for transition probabilities between states
+# Reference: xrate -g two_state_hmm.eg -t out.eg --maxrounds 1 -pi 0 -pm 0 -pt 0
+# ---------------------------------------------------------------------------
+
+class TestXrateTwoStateHMM:
+    """Compare 2-state phylo-HMM (slow/fast) against xrate."""
+
+    # xrate reference: updated rules after 1 EM round
+    XRATE_RULES = {
+        'SLOW_S*->SLOW_S': 0.90125, 'SLOW_S*->FAST_S': 0.0304799,
+        'SLOW_S*->': 0.068726,
+        'FAST_S*->FAST_S': 0.407254, 'FAST_S*->SLOW_S': 0.567228,
+        'FAST_S*->': 0.0257372,
+    }
+
+    # xrate reference: updated rates after 1 EM round
+    XRATE_SLOW_RATES = {
+        (0, 1): 0.0908169, (0, 2): 0.422364, (0, 3): 0.600034,
+        (1, 0): 0.0959254, (1, 2): 0.307742, (1, 3): 0.828989,
+        (2, 0): 0.357707, (2, 1): 0.246752, (2, 3): 0.0814067,
+        (3, 0): 0.564786, (3, 1): 0.738736, (3, 2): 0.0904747,
+    }
+    XRATE_FAST_RATES = {
+        (0, 1): 2.07708, (0, 2): 2.35092, (0, 3): 2.89776,
+        (1, 0): 3.15221, (1, 2): 2.61651, (1, 3): 3.75696,
+        (2, 0): 3.81279, (2, 1): 2.79619, (2, 3): 3.34509,
+        (3, 0): 2.87688, (3, 1): 2.45773, (3, 2): 2.04768,
+    }
+
+    # xrate reference: expected chain counts
+    XRATE_SLOW_WAITS = [2.38511, 2.25809, 2.81623, 2.53397]
+    XRATE_FAST_WAITS = [0.156381, 0.103043, 0.0964223, 0.157515]
+
+    @pytest.fixture
+    def setup(self):
+        alignment, tree, _ = _load_alignment_with_tree(
+            os.path.join(DATA_DIR, 'hmm_test.sto'),
+            alphabet=['A', 'C', 'G', 'U'],
+        )
+        xg = parse_xrate_file(os.path.join(DATA_DIR, 'two_state_hmm.eg'))
+        return alignment, tree, xg
+
+    def test_log_likelihood(self, setup):
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        tw = pm.terminal_weights()
+        _, ll = inside(xg.grammar, tw)
+        ll_bits = float(ll) / math.log(2)
+        np.testing.assert_allclose(ll_bits, -99.8657, atol=0.05)
+
+    def test_em_rules(self, setup):
+        """Rule updates match xrate after one EM step."""
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        phylo_em_step(pm, fit_rules=True, fit_rates=False, fit_pi=False,
+                      pseudocounts=0.0)
+        for rule in pm.grammar.rules:
+            nt = pm.grammar.nonterminals[rule.lhs].name
+            rhs = ' '.join(pm.grammar.nonterminals[r].name for r in rule.rhs)
+            key = f"{nt}->{rhs}" if rhs else f"{nt}->"
+            if key in self.XRATE_RULES:
+                np.testing.assert_allclose(
+                    math.exp(rule.log_weight), self.XRATE_RULES[key],
+                    rtol=RTOL, err_msg=f"rule {key}")
+
+    def test_em_slow_rates(self, setup):
+        """Slow chain rates match xrate after one EM step."""
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        phylo_em_step(pm, fit_rules=False, fit_rates=True, fit_pi=True,
+                      pseudocounts=0.0)
+        Q_slow = pm.chains[0]['rate_matrix']
+        for (i, j), xr_val in self.XRATE_SLOW_RATES.items():
+            np.testing.assert_allclose(
+                Q_slow[i, j], xr_val, rtol=RTOL,
+                err_msg=f"slow rate[{i},{j}]")
+
+    def test_em_fast_rates(self, setup):
+        """Fast chain rates match xrate after one EM step."""
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        phylo_em_step(pm, fit_rules=False, fit_rates=True, fit_pi=True,
+                      pseudocounts=0.0)
+        Q_fast = pm.chains[1]['rate_matrix']
+        for (i, j), xr_val in self.XRATE_FAST_RATES.items():
+            np.testing.assert_allclose(
+                Q_fast[i, j], xr_val, rtol=RTOL,
+                err_msg=f"fast rate[{i},{j}]")
+
+    def test_slow_chain_row_sums(self, setup):
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        phylo_em_step(pm, fit_rules=False, fit_rates=True, fit_pi=True,
+                      pseudocounts=0.0)
+        np.testing.assert_allclose(
+            pm.chains[0]['rate_matrix'].sum(axis=1), 0, atol=1e-10)
+
+    def test_fast_chain_row_sums(self, setup):
+        alignment, tree, xg = setup
+        pm = PhyloModel.from_xrate(xg, alignment, tree)
+        phylo_em_step(pm, fit_rules=False, fit_rates=True, fit_pi=True,
+                      pseudocounts=0.0)
+        np.testing.assert_allclose(
+            pm.chains[1]['rate_matrix'].sum(axis=1), 0, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

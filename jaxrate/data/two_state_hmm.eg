@@ -1,0 +1,70 @@
+(alphabet
+ (name RNA)
+ (token (a c g u))
+)
+
+(grammar
+ (name TwoStateHMM)
+ (update-rules 1)
+ (update-rates 1)
+
+ ;; Slow-evolving chain (model index 0)
+ (chain
+  (update-policy rev)
+  (terminal (SLOW))
+  (initial (state (a)) (prob 0.25))
+  (initial (state (c)) (prob 0.25))
+  (initial (state (g)) (prob 0.25))
+  (initial (state (u)) (prob 0.25))
+  (mutate (from (a)) (to (c)) (rate 0.5))
+  (mutate (from (a)) (to (g)) (rate 0.5))
+  (mutate (from (a)) (to (u)) (rate 0.5))
+  (mutate (from (c)) (to (a)) (rate 0.5))
+  (mutate (from (c)) (to (g)) (rate 0.5))
+  (mutate (from (c)) (to (u)) (rate 0.5))
+  (mutate (from (g)) (to (a)) (rate 0.5))
+  (mutate (from (g)) (to (c)) (rate 0.5))
+  (mutate (from (g)) (to (u)) (rate 0.5))
+  (mutate (from (u)) (to (a)) (rate 0.5))
+  (mutate (from (u)) (to (c)) (rate 0.5))
+  (mutate (from (u)) (to (g)) (rate 0.5))
+ )
+
+ ;; Fast-evolving chain (model index 1)
+ (chain
+  (update-policy rev)
+  (terminal (FAST))
+  (initial (state (a)) (prob 0.25))
+  (initial (state (c)) (prob 0.25))
+  (initial (state (g)) (prob 0.25))
+  (initial (state (u)) (prob 0.25))
+  (mutate (from (a)) (to (c)) (rate 3.0))
+  (mutate (from (a)) (to (g)) (rate 3.0))
+  (mutate (from (a)) (to (u)) (rate 3.0))
+  (mutate (from (c)) (to (a)) (rate 3.0))
+  (mutate (from (c)) (to (g)) (rate 3.0))
+  (mutate (from (c)) (to (u)) (rate 3.0))
+  (mutate (from (g)) (to (a)) (rate 3.0))
+  (mutate (from (g)) (to (c)) (rate 3.0))
+  (mutate (from (g)) (to (u)) (rate 3.0))
+  (mutate (from (u)) (to (a)) (rate 3.0))
+  (mutate (from (u)) (to (c)) (rate 3.0))
+  (mutate (from (u)) (to (g)) (rate 3.0))
+ )
+
+ ;; HMM state: slow
+ (transform (from (SLOW_S)) (to (SLOW SLOW_S*)))
+ (transform (from (SLOW_S*)) (to (SLOW_S)) (prob 0.8))
+ (transform (from (SLOW_S*)) (to (FAST_S)) (prob 0.15))
+ (transform (from (SLOW_S*)) (to ()) (prob 0.05))
+
+ ;; HMM state: fast
+ (transform (from (FAST_S)) (to (FAST FAST_S*)))
+ (transform (from (FAST_S*)) (to (FAST_S)) (prob 0.8))
+ (transform (from (FAST_S*)) (to (SLOW_S)) (prob 0.15))
+ (transform (from (FAST_S*)) (to ()) (prob 0.05))
+
+ ;; Start
+ (transform (from (Start)) (to (SLOW_S)) (prob 0.5))
+ (transform (from (Start)) (to (FAST_S)) (prob 0.5))
+)
